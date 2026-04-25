@@ -110,37 +110,54 @@ def _is_vague_answer(answer: str) -> bool:
 
 # -------------------- NODES --------------------
 
+GREETINGS = {"hello", "hi", "hey", "start", "begin", "ok", "okay", "yes", "sure"}
+
 def intake_node(state: IntakeState) -> dict:
     messages = state.get("messages", [])
     last_idx = state.get("last_processed_message_index", 0)
     cc = state.get("chief_complaint", "")
 
+    if cc:
+        return {"current_node": "hpi"}
+
     has_new_user_msg = len(messages) > last_idx
+    greeting_reply = "Hello, I'm conducting your pre-visit clinical intake. What brings you in today?"
 
-    if not cc and has_new_user_msg:
-        user_msg = messages[-1]
-        if user_msg.get("role") == "user":
-            cc = user_msg.get("content", "")
+    if has_new_user_msg:
+        user_msg = next((m for m in messages[last_idx:] if m["role"] == "user"), None)
+        if user_msg:
+            content = user_msg["content"].strip()
 
+            if content.lower() in GREETINGS or len(content) <= 4:
+                return {
+                    "messages": [{"role": "assistant", "content": greeting_reply}],
+                    "chief_complaint": "",
+                    "current_node": "intake",
+                    "last_processed_message_index": len(messages),
+                    "vague_retry_field": None,
+                }
+
+            cc = content
             if _MOCK():
                 reply = f"I understand you're experiencing {cc}. Let me ask a few questions."
             else:
                 reply = _ask(
-                    f"Patient says: '{cc}'. "
-                    "Reply in one short sentence. Acknowledge and say you will ask a few questions."
+                    f"Patient's chief complaint is: '{cc}'. "
+                    "Acknowledge it in one sentence and say you'll ask a few questions."
                 )
-        else:
-            reply = "What brings you in today?"
-    elif not cc:
-        reply = "What brings you in today?"
-    else:
-        return {"current_node": "hpi"}
+            return {
+                "messages": [{"role": "assistant", "content": reply}],
+                "chief_complaint": cc,
+                "current_node": "hpi",
+                "last_processed_message_index": len(messages),
+                "vague_retry_field": None,
+            }
 
     return {
-        "messages": [{"role": "assistant", "content": reply}],
-        "chief_complaint": cc,
-        "current_node": "hpi",
-        "last_processed_message_index": len(messages) if has_new_user_msg else last_idx,
+        "messages": [{"role": "assistant", "content": greeting_reply}],
+        "chief_complaint": "",
+        "current_node": "intake",
+        "last_processed_message_index": last_idx,
         "vague_retry_field": None,
     }
 
@@ -314,13 +331,26 @@ def build_graph():
     workflow.add_node("ros", ros_node)
     workflow.add_node("brief_generator", brief_generator_node)
 
+    def route(state: IntakeState) -> str:
+        return state.get("current_node", "intake")
+
     workflow.add_edge(START, "intake")
-    workflow.add_edge("intake", "hpi")
-    workflow.add_edge("hpi", "ros")
-    workflow.add_edge("ros", "brief_generator")
+
+    workflow.add_conditional_edges(
+        "intake", route, {"intake": "intake", "hpi": "hpi"}
+    )
+    workflow.add_conditional_edges(
+        "hpi", route, {"hpi": "hpi", "ros": "ros"}
+    )
+    workflow.add_conditional_edges(
+        "ros", route, {"ros": "ros", "brief_generator": "brief_generator"}
+    )
     workflow.add_edge("brief_generator", END)
 
     checkpointer = MemorySaver()
-    graph = workflow.compile(checkpointer=checkpointer)
+    graph = workflow.compile(
+        checkpointer=checkpointer,
+        interrupt_after=["intake", "hpi", "ros"]
+    )
 
     return graph, checkpointer
