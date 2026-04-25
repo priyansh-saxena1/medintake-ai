@@ -406,11 +406,12 @@
     }
 
     .brief-header {
-      padding: 16px 20px;
+      padding: 12px 20px;
       border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 8px;
     }
 
     .brief-header h2 {
@@ -419,6 +420,12 @@
       color: var(--text-primary);
       letter-spacing: 0.02em;
       text-transform: uppercase;
+    }
+
+    .brief-header-right {
+      display: flex;
+      align-items: center;
+      gap: 6px;
     }
 
     .brief-badge {
@@ -434,6 +441,23 @@
       background: var(--success-light);
       color: var(--success);
     }
+
+    .icon-btn {
+      width: 28px;
+      height: 28px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text-secondary);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+    .icon-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-light); }
+    .icon-btn svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
     .brief-content {
       flex: 1;
@@ -664,7 +688,15 @@
   <div class="brief-panel">
     <div class="brief-header">
       <h2>Clinical Brief</h2>
-      <span class="brief-badge" id="briefBadge">Pending</span>
+      <div class="brief-header-right">
+        <button class="icon-btn" id="copyBtn" title="Copy to clipboard" style="display:none">
+          <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+        <button class="icon-btn" id="printBtn" title="Print" style="display:none">
+          <svg viewBox="0 0 24 24"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+        </button>
+        <span class="brief-badge" id="briefBadge">Pending</span>
+      </div>
     </div>
     <div class="brief-content" id="briefContent">
       <div class="brief-empty">
@@ -769,12 +801,19 @@
     if (el) el.remove();
   }
 
+  let lastBrief = null;
+
   function renderBrief(brief) {
-    const hpiLabels = {
-      onset: 'Onset', location: 'Location', duration: 'Duration',
-      character: 'Character', severity: 'Severity',
-      aggravating: 'Aggravating', relieving: 'Relieving'
-    };
+    lastBrief = brief;
+    const hpiLabels = [
+      ['onset', 'Onset'],
+      ['location', 'Location'],
+      ['duration', 'Duration'],
+      ['character', 'Character'],
+      ['severity', 'Severity'],
+      ['aggravating', 'Aggravating'],
+      ['relieving', 'Relieving'],
+    ];
 
     let html = `
       <div class="brief-section">
@@ -786,12 +825,13 @@
         <div class="hpi-grid">
     `;
 
-    for (const [key, label] of Object.entries(hpiLabels)) {
+    for (const [key, label] of hpiLabels) {
       const val = brief.hpi[key] || 'Not specified';
+      const isMissing = !brief.hpi[key] || brief.hpi[key] === 'Not specified';
       html += `
         <div class="hpi-row">
           <div class="hpi-key">${label}</div>
-          <div class="hpi-val">${escHtml(val)}</div>
+          <div class="hpi-val" style="${isMissing ? 'color:var(--text-muted);font-style:italic' : ''}">${escHtml(val)}</div>
         </div>
       `;
     }
@@ -801,9 +841,11 @@
     if (brief.ros && Object.keys(brief.ros).length > 0) {
       html += `<div class="brief-section"><div class="brief-section-title">Review of Systems</div>`;
       for (const [system, findings] of Object.entries(brief.ros)) {
-        html += `<div class="ros-system"><div class="ros-system-name">${escHtml(system)}</div><div class="ros-findings">`;
+        const label = system.charAt(0).toUpperCase() + system.slice(1);
+        html += `<div class="ros-system"><div class="ros-system-name">${escHtml(label)}</div><div class="ros-findings">`;
         findings.forEach(f => {
-          const isNeg = f.toLowerCase().startsWith('no ') || f.toLowerCase().includes('none');
+          const fl = f.toLowerCase();
+          const isNeg = fl.startsWith('no ') || fl.includes('none') || fl.includes('absent') || fl.includes('denied') || fl.includes('no swelling') || fl.includes('negative');
           html += `<span class="finding-tag ${isNeg ? 'negative' : 'positive'}">${escHtml(f)}</span>`;
         });
         html += `</div></div>`;
@@ -817,6 +859,28 @@
     briefContent.innerHTML = html;
     briefBadge.textContent = 'Complete';
     briefBadge.className = 'brief-badge complete';
+    document.getElementById('copyBtn').style.display = 'flex';
+    document.getElementById('printBtn').style.display = 'flex';
+  }
+
+  function briefToPlainText(brief) {
+    const hpiLabels = ['onset','location','duration','character','severity','aggravating','relieving'];
+    let txt = `CLINICAL BRIEF\n${'='.repeat(40)}\n`;
+    txt += `Chief Complaint: ${brief.chief_complaint}\n\n`;
+    txt += `History of Present Illness\n${'-'.repeat(30)}\n`;
+    for (const key of hpiLabels) {
+      const val = brief.hpi[key] || 'Not specified';
+      txt += `${key.charAt(0).toUpperCase()+key.slice(1).padEnd(14)}: ${val}\n`;
+    }
+    if (brief.ros && Object.keys(brief.ros).length > 0) {
+      txt += `\nReview of Systems\n${'-'.repeat(30)}\n`;
+      for (const [sys, findings] of Object.entries(brief.ros)) {
+        txt += `${sys.charAt(0).toUpperCase()+sys.slice(1)}: ${findings.join(', ')}\n`;
+      }
+    }
+    const ts = brief.generated_at ? new Date(brief.generated_at).toLocaleString() : '';
+    if (ts) txt += `\nGenerated: ${ts}`;
+    return txt;
   }
 
   function escHtml(str) {
@@ -901,6 +965,25 @@
       setStatus('offline');
     }
   }
+
+  document.getElementById('copyBtn').addEventListener('click', () => {
+    if (!lastBrief) return;
+    const txt = briefToPlainText(lastBrief);
+    navigator.clipboard.writeText(txt).then(() => {
+      const btn = document.getElementById('copyBtn');
+      btn.title = 'Copied!';
+      setTimeout(() => { btn.title = 'Copy to clipboard'; }, 2000);
+    });
+  });
+
+  document.getElementById('printBtn').addEventListener('click', () => {
+    if (!lastBrief) return;
+    const txt = briefToPlainText(lastBrief);
+    const w = window.open('', '_blank');
+    w.document.write(`<pre style="font-family:monospace;padding:24px;max-width:700px;margin:auto">${txt}</pre>`);
+    w.document.close();
+    w.print();
+  });
 
   sendBtn.addEventListener('click', () => {
     const text = inputEl.value.trim();

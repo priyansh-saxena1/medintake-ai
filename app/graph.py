@@ -2,7 +2,7 @@ from typing import Optional, TypedDict, Annotated
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 import os
-from app.llm import get_llm
+import re
 
 _MOCK = lambda: os.environ.get("MOCK_LLM", "true").lower() == "true"
 
@@ -18,11 +18,11 @@ Rules:
 
 
 def _ask(prompt: str) -> str:
+    from app.llm import get_llm
     llm = get_llm()
     try:
         return llm.ask(prompt, system=SYSTEM_PROMPT)
     except TypeError:
-        # fallback if system param not supported
         return llm.ask(prompt)
 
 
@@ -46,14 +46,15 @@ class IntakeState(TypedDict):
 
 HPI_FIELDS = ["onset", "location", "duration", "character", "severity", "aggravating", "relieving"]
 
+# Questions are templated — {cc} will be replaced with chief complaint
 HPI_QUESTIONS = {
-    "onset": "When did your symptoms first start?",
-    "location": "Where exactly do you feel the pain or discomfort?",
-    "duration": "How long does each episode last? Is it constant or intermittent?",
-    "character": "Can you describe what the pain feels like?",
-    "severity": "On a scale of 1 to 10, how severe is your pain?",
-    "aggravating": "What makes your symptoms worse?",
-    "relieving": "What helps relieve your symptoms?"
+    "onset": "When did {cc} start?",
+    "location": "Where exactly do you feel {cc}?",
+    "duration": "Is {cc} constant or does it come and go? How long does each episode last?",
+    "character": "How would you describe {cc} — sharp, dull, pressure, burning?",
+    "severity": "On a 1–10 scale, how severe is your {cc} right now?",
+    "aggravating": "Does anything make {cc} worse, like activity or certain foods?",
+    "relieving": "What helps relieve your {cc}?"
 }
 
 HPI_FIELD_CONTEXT = {
@@ -81,36 +82,73 @@ CC_KEYWORDS_TO_ROS = {
 
 DEFAULT_ROS = ["constitutional", "cardiac", "respiratory"]
 
+ROS_SYSTEM_QUESTIONS = {
+    "cardiac": "Any palpitations, fluttering, or swelling in your legs or ankles?",
+    "respiratory": "Any shortness of breath, wheezing, or cough?",
+    "gi": "Any nausea, vomiting, heartburn, or abdominal pain?",
+    "neuro": "Any headaches, dizziness, numbness, or vision changes?",
+    "ent": "Any ear pain, sore throat, or sinus pressure?",
+    "vision": "Any blurry vision, double vision, or eye pain?",
+    "constitutional": "Any fever, chills, unexplained weight loss, or fatigue?",
+}
+
 
 def get_relevant_ros_systems(cc: str) -> list[str]:
     cc_lower = cc.lower()
+    seen = []
     for keyword, systems in CC_KEYWORDS_TO_ROS.items():
         if keyword in cc_lower:
-            return systems
-    return DEFAULT_ROS
+            for s in systems:
+                if s not in seen:
+                    seen.append(s)
+    return seen if seen else DEFAULT_ROS
 
 
-import re
+def _fmt_question(field: str, cc: str) -> str:
+    """Format an HPI question, injecting the chief complaint naturally."""
+    q = HPI_QUESTIONS[field]
+    cc_short = cc.split()[0:4]  # first few words of complaint
+    cc_str = " ".join(cc_short).lower() if cc_short else "this"
+    return q.format(cc=cc_str)
 
 
 def extract_hpi_value(answer: str, field: str) -> str:
     answer = answer.strip()
     if field == "severity":
-        match = re.search(r'(\d{1,2})\s*(?:out of|/)?\s*10', answer, re.IGNORECASE)
+        match = re.search(r'(\d{1,2})\s*(?:out of|/|over)?\s*10', answer, re.IGNORECASE)
         if match:
             return f"{match.group(1)}/10"
+        # also handle bare numbers 1-10
+        match2 = re.search(r'\b([1-9]|10)\b', answer)
+        if match2:
+            return f"{match2.group(1)}/10"
     return answer
 
 
 def _is_vague_answer(answer: str) -> bool:
-    vague_phrases = ["i don't know", "not sure", "dont know", "idk", "maybe", "i guess"]
-    answer_lower = answer.lower()
-    return any(phrase in answer_lower for phrase in vague_phrases)
+    vague_phrases = ["i don't know", "not sure", "dont know", "idk", "maybe", "i guess", "not really", "not sure"]
+    return any(phrase in answer.lower() for phrase in vague_phrases)
+
+
+def _parse_ros_answer(answer: str) -> list[str]:
+    """
+    Parse a free-text ROS answer into a list of individual findings.
+    Handles comma-separated, 'and'-joined, and 'no X' style negative findings.
+    """
+    # Split on commas, semicolons, and 'and'
+    parts = re.split(r'[,;]|\band\b', answer, flags=re.IGNORECASE)
+    findings = []
+    for part in parts:
+        part = part.strip()
+        if part:
+            findings.append(part)
+    return findings if findings else [answer.strip()]
 
 
 # -------------------- NODES --------------------
 
 GREETINGS = {"hello", "hi", "hey", "start", "begin", "ok", "okay", "yes", "sure"}
+
 
 def intake_node(state: IntakeState) -> dict:
     messages = state.get("messages", [])
@@ -139,7 +177,7 @@ def intake_node(state: IntakeState) -> dict:
 
             cc = content
             if _MOCK():
-                reply = f"I understand you're experiencing {cc}. Let me ask a few questions."
+                reply = f"Got it — {cc}. I'll ask a few quick questions to document your visit."
             else:
                 reply = _ask(
                     f"Patient's chief complaint is: '{cc}'. "
@@ -178,7 +216,7 @@ def hpi_node(state: IntakeState) -> dict:
 
     if next_field is None:
         return {
-            "messages": [{"role": "assistant", "content": "Now I’ll ask about other symptoms."}],
+            "messages": [{"role": "assistant", "content": "Thank you. Now I'll ask about a few other symptoms."}],
             "current_node": "ros",
             "last_processed_message_index": len(messages),
             "vague_retry_field": None,
@@ -196,7 +234,7 @@ def hpi_node(state: IntakeState) -> dict:
                 field_context = HPI_FIELD_CONTEXT[next_field]
 
                 if _MOCK():
-                    reply = f"Please be more specific about {field_context}."
+                    reply = f"Could you be more specific? I need to know {field_context}."
                 else:
                     reply = _ask(
                         f"Patient response about {field_context} was vague. "
@@ -217,7 +255,7 @@ def hpi_node(state: IntakeState) -> dict:
                 next_field = HPI_FIELDS[next_idx + 1]
 
                 if _MOCK():
-                    reply = HPI_QUESTIONS[next_field]
+                    reply = _fmt_question(next_field, cc)
                 else:
                     reply = _ask(
                         f"Complaint: {cc}. Known info: {hpi}. "
@@ -233,7 +271,7 @@ def hpi_node(state: IntakeState) -> dict:
                 }
 
             return {
-                "messages": [{"role": "assistant", "content": "Now I’ll ask about other symptoms."}],
+                "messages": [{"role": "assistant", "content": "Thank you. Now I'll ask about a few other symptoms."}],
                 "hpi": hpi,
                 "current_node": "ros",
                 "last_processed_message_index": len(messages),
@@ -241,7 +279,7 @@ def hpi_node(state: IntakeState) -> dict:
             }
 
     if _MOCK():
-        reply = HPI_QUESTIONS[next_field]
+        reply = _fmt_question(next_field, cc)
     else:
         reply = _ask(
             f"Complaint: {cc}. Known info: {hpi}. "
@@ -268,7 +306,7 @@ def ros_node(state: IntakeState) -> dict:
 
     if current_idx >= len(ros_systems):
         return {
-            "messages": [{"role": "assistant", "content": "I have enough information."}],
+            "messages": [{"role": "assistant", "content": "Thank you — I have everything I need."}],
             "current_node": "brief_generator",
             "last_processed_message_index": len(messages),
         }
@@ -277,12 +315,12 @@ def ros_node(state: IntakeState) -> dict:
 
     if has_new_user_msg and pending:
         answer = messages[-1]["content"]
-        ros[pending] = [f.strip() for f in answer.split(",")]
+        ros[pending] = _parse_ros_answer(answer)
 
     next_system = ros_systems[current_idx]
 
     if _MOCK():
-        reply = f"Any {next_system} symptoms? Mention present and absent."
+        reply = ROS_SYSTEM_QUESTIONS.get(next_system, f"Any {next_system} symptoms? Mention present and absent.")
     else:
         reply = _ask(
             f"Ask about {next_system} symptoms. One short question. "
@@ -306,18 +344,60 @@ from datetime import datetime, timezone
 from app.schemas import HPI as HPIModel, ClinicalBrief as ClinicalBriefModel
 
 
+def _clean_hpi_value(field: str, raw: str) -> str:
+    """
+    Convert a raw patient answer into a clean clinical phrase.
+    Removes filler words and informal language.
+    """
+    raw = raw.strip()
+
+    # Remove filler starters
+    fillers = [
+        r'^(yeah|yes|no|well|so|like|um|uh|i mean|i guess),?\s*',
+        r'^(it\'?s?\s+)',
+        r'^(the\s+)',
+    ]
+    for pattern in fillers:
+        raw = re.sub(pattern, '', raw, flags=re.IGNORECASE).strip()
+
+    if not raw:
+        return "not specified"
+
+    # Capitalize first letter
+    return raw[0].upper() + raw[1:]
+
+
 def brief_generator_node(state: IntakeState) -> dict:
-    hpi_obj = HPIModel(**{f: state.get("hpi", {}).get(f) or "not specified" for f in HPI_FIELDS})
+    raw_hpi = state.get("hpi", {})
+
+    # Clean each HPI field
+    cleaned_hpi = {f: _clean_hpi_value(f, raw_hpi.get(f) or "not specified") for f in HPI_FIELDS}
+
+    hpi_obj = HPIModel(**cleaned_hpi)
+
+    # Clean ROS — ensure each system has a proper list of findings
+    raw_ros = state.get("ros", {})
+    cleaned_ros: dict[str, list[str]] = {}
+    for system, findings in raw_ros.items():
+        clean_findings = []
+        for f in findings:
+            f = f.strip()
+            if f:
+                # Capitalize
+                f = f[0].upper() + f[1:]
+                clean_findings.append(f)
+        if clean_findings:
+            cleaned_ros[system] = clean_findings
 
     brief = ClinicalBriefModel(
         chief_complaint=state.get("chief_complaint", ""),
         hpi=hpi_obj,
-        ros=state.get("ros", {}),
+        ros=cleaned_ros,
         generated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     )
 
     return {
-        "messages": [{"role": "assistant", "content": "Intake complete. Here is your summary."}],
+        "messages": [{"role": "assistant", "content": "Intake complete. Your clinical summary is ready."}],
         "current_node": "done",
         "clinical_brief": brief.model_dump(),
     }
