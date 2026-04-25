@@ -156,10 +156,12 @@ class TransformersLLM:
 
     def _load(self):
         if self.model is None and not self._load_lock:
+            import time
+            t0 = time.time()
             self._load_lock = True
             from transformers import AutoModelForCausalLM, AutoTokenizer
             import torch
-            print(f"[LLM] Loading model {self.model_name}...")
+            print(f"[LLM] Loading {self.model_name} into memory. This may take 5-30 secs on CPU...")
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             # Use float16 — halves memory footprint and is ~2x faster than float32 on CPU
             dtype = torch.float16
@@ -170,15 +172,21 @@ class TransformersLLM:
                 low_cpu_mem_usage=True,
             )
             self.model.eval()
-            print("[LLM] Model ready.")
+            print(f"[LLM] Model load complete in {time.time() - t0:.1f} seconds.")
 
-    def _infer(self, messages: list[dict], max_tokens: int = 350) -> str:
+    def _infer(self, messages: list[dict], max_tokens: int = 200) -> str:
         """Single shared inference method. Greedy decode for speed."""
         import torch
+        import time
+        
+        t0 = time.time()
         text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
         inputs = self.tokenizer(text, return_tensors="pt")
+        tok_time = time.time() - t0
+        
+        t1 = time.time()
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -186,10 +194,17 @@ class TransformersLLM:
                 do_sample=False,         # Greedy — deterministic and fastest
                 pad_token_id=self.tokenizer.eos_token_id,
             )
+        gen_time = time.time() - t1
+        
+        t2 = time.time()
         response = self.tokenizer.decode(
             outputs[0][inputs.input_ids.shape[1]:],
             skip_special_tokens=True,
         )
+        dec_time = time.time() - t2
+        
+        print(f"[LLM Timing] Tokens generated: {outputs.shape[1] - inputs.input_ids.shape[1]} | "
+              f"Tokenize: {tok_time:.3f}s | Infer: {gen_time:.1f}s | Decode: {dec_time:.3f}s")
         return response.strip()
 
     def combined_call(self, transcript: str, current_json: str) -> CombinedOutput:
@@ -211,7 +226,11 @@ class TransformersLLM:
             {"role": "user", "content": prompt},
         ]
 
-        raw = self._infer(messages, max_tokens=350)
+        import time
+        t_start = time.time()
+        print("[LLM] Starting inference call...")
+        raw = self._infer(messages, max_tokens=200)
+        print(f"[LLM] Inference completed in {time.time() - t_start:.1f} seconds total.")
 
         # Parse JSON robustly
         json_str = raw
