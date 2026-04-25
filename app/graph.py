@@ -112,8 +112,14 @@ def agent_node(state: IntakeState) -> dict:
     current_json = state.get("clinical_state") or CombinedOutput().model_dump_json()
     transcript = format_transcript(msgs)
 
+    import time
+    t_agent = time.time()
+    print(f"[{time.time():.3f}] [Graph Node] Requesting LLM inference...")
+
     llm = get_llm()
     result: CombinedOutput = llm.combined_call(transcript, current_json)
+
+    print(f"[{time.time():.3f}] [Graph Node] LLM returned. Preparing node dictionaries...")
 
     if result.emergency:
         return {

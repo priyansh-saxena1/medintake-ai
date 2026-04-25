@@ -82,25 +82,37 @@ async def health():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    import time
+    t0 = time.time()
+    print(f"\n[{t0:.3f}] [API] -> POST /chat received for {request.session_id}")
     config = {"configurable": {"thread_id": request.session_id}}
     
     # Get current checkpoint state
     snapshot = graph.get_state(config)
+    print(f"[{time.time():.3f}] [API] Read existing state snapshot.")
     
     # Check if graph is interrupted and waiting for input
+    t_start_graph = time.time()
     if snapshot.next:
+        print(f"[{time.time():.3f}] [API] Resuming graph from interrupt...")
         # First update state with the user message
         graph.update_state(config, {"messages": [{"role": "user", "content": request.message}]})
         # Then resume execution
         result = graph.invoke(None, config=config)
     else:
+        print(f"[{time.time():.3f}] [API] Starting new graph invoke...")
         # New conversation - start fresh
         input_state = {"messages": [{"role": "user", "content": request.message}]}
         result = graph.invoke(input_state, config=config)
+    print(f"[{time.time():.3f}] [API] <- Graph invoke returned in {time.time() - t_start_graph:.2f}s")
     
+    t_final = time.time()
     current_node = get_current_node(request.session_id)
     reply = get_last_reply(request.session_id)
     brief_dict = get_brief(request.session_id)
+    
+    total_t = time.time() - t0
+    print(f"[{time.time():.3f}] [API] Chat completed in {total_t:.2f}s total. Reply length: {len(reply)}")
     
     return ChatResponse(reply=reply, state=current_node, brief=brief_dict)
 
