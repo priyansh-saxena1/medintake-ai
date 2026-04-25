@@ -14,7 +14,6 @@ CRITICAL RULES:
 - Do NOT diagnose or give medical advice.
 - Do NOT ask more than one question.
 - If all fields are complete, set reply to "Thank you — I have everything I need."
-- EMERGENCY RULE: Set emergency=true ONLY IF the patient explicitly describes an acute life-threatening event right now (e.g., EXACT words "crushing chest pain", "I can't breathe right now", "I want to kill myself"). Do NOT set emergency=true for generic "chest pain", "headache", or past symptoms. Default is always false.
 
 OUTPUT FORMAT (strictly follow this, no extra text):
 {
@@ -27,7 +26,6 @@ OUTPUT FORMAT (strictly follow this, no extra text):
   "aggravating": "...",
   "relieving": "...",
   "ros": {"system_name": ["finding1", "finding2"]},
-  "emergency": false,
   "reply": "The single question to ask the patient next"
 }
 
@@ -44,7 +42,6 @@ class CombinedOutput(BaseModel):
     aggravating: str | None = None
     relieving: str | None = None
     ros: dict[str, list[str]] = {}
-    emergency: bool = False
     reply: str = ""
 
 

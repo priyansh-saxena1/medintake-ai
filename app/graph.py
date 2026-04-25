@@ -121,17 +121,6 @@ def agent_node(state: IntakeState) -> dict:
 
     print(f"[{time.time():.3f}] [Graph Node] LLM returned. Preparing node dictionaries...")
 
-    if result.emergency:
-        return {
-            "messages": [{"role": "assistant", "content": (
-                "🚨 EMERGENCY: Your symptoms require immediate attention. "
-                "Please call 911 or go to your nearest emergency room right away."
-            )}],
-            "clinical_state": result.model_dump_json(),
-            "current_node": "done",
-            "frontend_stage": "done",
-        }
-
     stage = compute_stage(result)
     missing = missing_from(result)
     reply = result.reply or "Could you tell me more?"
