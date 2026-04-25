@@ -160,36 +160,6 @@ def agent_node(state: IntakeState) -> dict:
     }
 
 
-def scribe_node(state: IntakeState) -> dict:
-    """Build the final ClinicalBrief from the accumulated CombinedOutput state."""
-    state_json = state.get("clinical_state", "{}")
-    data = CombinedOutput.model_validate_json(state_json)
-
-    from datetime import datetime, timezone
-
-    brief = ClinicalBrief(
-        chief_complaint=data.chief_complaint or "Not specified",
-        hpi=HPI(
-            onset=data.onset or "Not specified",
-            location=data.location or "Not specified",
-            duration=data.duration or "Not specified",
-            character=data.character or "Not specified",
-            severity=data.severity or "Not specified",
-            aggravating=data.aggravating or "Not specified",
-            relieving=data.relieving or "Not specified",
-        ),
-        ros=data.ros,
-        generated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    )
-
-    return {
-        "messages": [{"role": "assistant", "content": "Your clinical summary is ready. Please wait for the doctor."}],
-        "current_node": "done",
-        "frontend_stage": "done",
-        "clinical_brief": brief.model_dump(),
-    }
-
-
 # -------------------------------------------------------------- graph build --
 
 def build_graph():

@@ -42,6 +42,7 @@ class CombinedOutput(BaseModel):
     aggravating: str | None = None
     relieving: str | None = None
     ros: dict[str, list[str]] = {}
+    emergency: bool = False
     reply: str = ""
 
 
@@ -186,7 +187,7 @@ class OllamaLLM:
             response = requests.post(self.api_url, json=payload, timeout=60)
             response.raise_for_status()
             data = response.json()
-            raw = data.get("response", "")
+            raw = data.get("message", {}).get("content", "").strip()
         except Exception as e:
             print(f"[Ollama] ERROR calling local Ollama API: {e}")
             print("[Ollama] Make sure Ollama is installed and running, and the model is downloaded!")
