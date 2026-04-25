@@ -1,104 +1,180 @@
 import os
 import json
+import re
 from pydantic import BaseModel
 
-CLINICAL_SYSTEM_PROMPT = (
-    "You are a clinical intake assistant conducting a pre-visit patient interview. "
-    "Be empathetic, warm, and highly professional. "
-    "Do not diagnose or give medical advice. Keep responses under 2 sentences. "
-)
+COMBINED_SYSTEM_PROMPT = """You are a clinical intake assistant AI. You have two jobs per turn:
+
+JOB 1 (EXTRACT): Read the FULL conversation and update the clinical JSON state with any new information the patient provided. Only extract facts explicitly stated.
+
+JOB 2 (RESPOND): Based on what is STILL MISSING from the clinical state, ask the patient ONE natural, empathetic question. Do NOT ask about things already filled in.
+
+CRITICAL RULES:
+- Output ONLY valid JSON, nothing else.
+- Do NOT diagnose or give medical advice.
+- Do NOT ask more than one question.
+- If all fields are complete, set reply to "Thank you — I have everything I need."
+- Emergency override: if patient mentions "crushing chest pain", "can't breathe", "suicide", or similar life-threatening phrases, set emergency=true.
+
+OUTPUT FORMAT (strictly follow this, no extra text):
+{
+  "chief_complaint": "...",
+  "onset": "...",
+  "location": "...",
+  "duration": "...",
+  "character": "...",
+  "severity": "...",
+  "aggravating": "...",
+  "relieving": "...",
+  "ros": {"system_name": ["finding1", "finding2"]},
+  "emergency": false,
+  "reply": "The single question to ask the patient next"
+}
+
+Use null for any field not yet known. Keep existing values if the patient didn't add new info."""
+
+
+class CombinedOutput(BaseModel):
+    chief_complaint: str | None = None
+    onset: str | None = None
+    location: str | None = None
+    duration: str | None = None
+    character: str | None = None
+    severity: str | None = None
+    aggravating: str | None = None
+    relieving: str | None = None
+    ros: dict[str, list[str]] = {}
+    emergency: bool = False
+    reply: str = ""
+
 
 class MockLLM:
-    def __init__(self):
-        pass
+    def combined_call(self, transcript: str, current_json: str) -> CombinedOutput:
+        """Single call: extract + generate reply. No real inference in mock mode."""
+        t = transcript.lower()
+        try:
+            state = json.loads(current_json)
+        except Exception:
+            state = {}
 
-    def ask(self, instruction: str, system: str = CLINICAL_SYSTEM_PROMPT) -> str:
-        # We will heavily mock the responses in graph.py for tests
-        if "empathetic reply" in instruction.lower():
-            if "chest" in instruction.lower():
-                return "I'm sorry to hear about your chest pain. When did it start?"
-            return "I understand. Can you tell me more?"
+        # --- Extraction ---
+        if "chest pain" in t and not state.get("chief_complaint"):
+            state["chief_complaint"] = "chest pain"
+        if any(w in t for w in ["yesterday", "this morning", "last night", "hours ago", "days ago", "since"]):
+            if not state.get("onset"):
+                if "yesterday" in t:
+                    state["onset"] = "yesterday"
+                elif "this morning" in t or "morning" in t:
+                    state["onset"] = "this morning"
+                else:
+                    state["onset"] = "recently"
+        if any(w in t for w in ["center", "left", "right", "chest", "stomach", "head", "arm"]):
+            if not state.get("location"):
+                if "center" in t:
+                    state["location"] = "center of chest"
+                elif "left" in t:
+                    state["location"] = "left side of chest"
+        if any(w in t for w in ["constant", "intermittent", "comes and goes", "all day", "hours"]):
+            if not state.get("duration"):
+                state["duration"] = "constant" if "constant" in t else "intermittent"
+        if any(w in t for w in ["pressure", "tight", "squeezing", "sharp", "dull", "burning", "stabbing"]):
+            if not state.get("character"):
+                if "tight" in t or "squeezing" in t:
+                    state["character"] = "tight, squeezing pressure"
+                elif "sharp" in t:
+                    state["character"] = "sharp"
+        # Severity — match "N out of 10", "N/10", or isolated score digit
+        sev_match = re.search(r'\b([1-9]|10)\s*(?:out of|/|over)\s*10\b', t, re.IGNORECASE)
+        if not sev_match:
+            sev_match = re.search(r'\bseverity\s+(?:is\s+)?([1-9]|10)\b', t, re.IGNORECASE)
+        if sev_match and not state.get("severity"):
+            state["severity"] = f"{sev_match.group(1)}/10"
+        if any(w in t for w in ["walk", "run", "climb", "exert", "stress", "eating", "lying"]):
+            if not state.get("aggravating"):
+                if "walk" in t: state["aggravating"] = "walking"
+                elif "run" in t: state["aggravating"] = "running"
+                elif "climb" in t: state["aggravating"] = "climbing stairs"
+        if any(w in t for w in ["rest", "sit", "antacid", "medication", "nitroglycerin"]):
+            if not state.get("relieving"):
+                state["relieving"] = "resting"
+        if "palpitation" in t:
+            ros = state.get("ros", {})
+            ros["cardiac"] = ["palpitations present"] + (["no leg swelling"] if "no" in t and "swell" in t else [])
+            state["ros"] = ros
+        if "breath" in t or "wheez" in t or "cough" in t:
+            ros = state.get("ros", {})
+            ros["respiratory"] = ["shortness of breath" if "breath" in t else "no shortness of breath",
+                                    "no cough" if ("no" in t and "cough" in t) else ("cough" if "cough" in t else "no cough")]
+            state["ros"] = ros
+        if "nausea" in t or "vomit" in t or "heartburn" in t:
+            ros = state.get("ros", {})
+            ros["gi"] = ["no nausea" if ("no" in t and "nausea" in t) else "nausea",
+                         "no vomiting" if ("no" in t and "vomit" in t) else "vomiting present"]
+            state["ros"] = ros
         
-        # General fallback that allows tests to check for context
-        if "onset" in instruction.lower():
-            return "When did this start?"
-        elif "severity" in instruction.lower() or "scale" in instruction.lower():
-            return "On a scale of 1 to 10, how severe is this?"
-        elif "location" in instruction.lower():
-            return "Where exactly do you feel this?"
-        
-        return "Can you elaborate on that?"
+        state["emergency"] = any(e in t for e in ["crushing chest pain", "heart attack", "can't breathe", "suicide", "kill myself"])
 
-    def ask_json(self, transcript: str, current_state: str, schema_cls: type[BaseModel]) -> BaseModel:
-        # Mocking extraction logic for deterministic testing
-        t_low = transcript.lower()
-        state_dict = json.loads(current_state)
-        
-        # very basic test logic
-        if "chest pain" in t_low:
-            state_dict["chief_complaint"] = "chest pain"
-        if "yesterday" in t_low or "morning" in t_low:
-            if not state_dict.get("hpi"): state_dict["hpi"] = {}
-            state_dict["hpi"]["onset"] = "this morning" if "morning" in t_low else "yesterday"
-        if "center" in t_low:
-            if not state_dict.get("hpi"): state_dict["hpi"] = {}
-            state_dict["hpi"]["location"] = "center of chest"
-        if "constant" in t_low:
-            if not state_dict.get("hpi"): state_dict["hpi"] = {}
-            state_dict["hpi"]["duration"] = "constant"
-        if "pressure" in t_low or "tight" in t_low:
-            if not state_dict.get("hpi"): state_dict["hpi"] = {}
-            state_dict["hpi"]["character"] = "tight pressure"
-        if "7" in t_low or "seven" in t_low:
-            if not state_dict.get("hpi"): state_dict["hpi"] = {}
-            state_dict["hpi"]["severity"] = "7/10"
-        if "walk" in t_low or "running" in t_low:
-            if not state_dict.get("hpi"): state_dict["hpi"] = {}
-            state_dict["hpi"]["aggravating"] = "walking"
-        if "rest" in t_low:
-            if not state_dict.get("hpi"): state_dict["hpi"] = {}
-            state_dict["hpi"]["relieving"] = "resting"
-            
-        if "palpitations" in t_low:
-            if not state_dict.get("ros"): state_dict["ros"] = {}
-            state_dict["ros"]["cardiac"] = ["palpitations", "no syncope"]
-        if "breath" in t_low:
-            if not state_dict.get("ros"): state_dict["ros"] = {}
-            state_dict["ros"]["respiratory"] = ["shortness of breath", "no cough"]
-        if "nausea" in t_low:
-            if not state_dict.get("ros"): state_dict["ros"] = {}
-            state_dict["ros"]["gi"] = ["no nausea"]
-            
-        if "crushing chest pain" in t_low or "heart attack" in t_low or "emergency" in t_low:
-            state_dict["emergency_detected"] = True
-            
-        # Guarantee schema matches via Pydantic model_validate
-        return schema_cls.model_validate(state_dict)
+        # --- Determine next question ---
+        if not state.get("chief_complaint"):
+            state["reply"] = "What brings you in today?"
+        elif not state.get("onset"):
+            cc = state.get("chief_complaint", "this")
+            state["reply"] = f"When did the {cc} start?"
+        elif not state.get("location"):
+            state["reply"] = "Where exactly do you feel it?"
+        elif not state.get("duration"):
+            state["reply"] = "Is it constant or does it come and go?"
+        elif not state.get("character"):
+            state["reply"] = "How would you describe it — sharp, dull, pressure, or tightness?"
+        elif not state.get("severity"):
+            state["reply"] = "On a scale of 1 to 10, how severe is it right now?"
+        elif not state.get("aggravating"):
+            state["reply"] = "Does anything make it worse, like physical activity?"
+        elif not state.get("relieving"):
+            state["reply"] = "What helps relieve it?"
+        else:
+            ros = state.get("ros", {})
+            cc = state.get("chief_complaint", "chest pain")
+            if "cardiac" not in ros:
+                state["reply"] = "Any heart-related symptoms — palpitations or leg swelling?"
+            elif "respiratory" not in ros:
+                state["reply"] = "Any shortness of breath, wheezing, or coughing?"
+            elif "gi" not in ros:
+                state["reply"] = "Any nausea, vomiting, or heartburn?"
+            else:
+                state["reply"] = "Thank you — I have everything I need."
+
+        return CombinedOutput.model_validate(state)
+
 
 class TransformersLLM:
     def __init__(self):
         self.model = None
         self.tokenizer = None
         self.model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-0.5B-Instruct")
+        self._load_lock = False
 
     def _load(self):
-        if self.model is None:
+        if self.model is None and not self._load_lock:
+            self._load_lock = True
             from transformers import AutoModelForCausalLM, AutoTokenizer
             import torch
+            print(f"[LLM] Loading model {self.model_name}...")
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            # Use float16 — halves memory footprint and is ~2x faster than float32 on CPU
+            dtype = torch.float16
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                torch_dtype=torch.float32,
+                torch_dtype=dtype,
                 device_map="cpu",
+                low_cpu_mem_usage=True,
             )
+            self.model.eval()
+            print("[LLM] Model ready.")
 
-    def ask(self, instruction: str, system: str = CLINICAL_SYSTEM_PROMPT) -> str:
-        self._load()
+    def _infer(self, messages: list[dict], max_tokens: int = 350) -> str:
+        """Single shared inference method. Greedy decode for speed."""
         import torch
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": instruction},
-        ]
         text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -106,9 +182,8 @@ class TransformersLLM:
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=100,
-                temperature=0.4,
-                do_sample=True,
+                max_new_tokens=max_tokens,
+                do_sample=False,         # Greedy — deterministic and fastest
                 pad_token_id=self.tokenizer.eos_token_id,
             )
         response = self.tokenizer.decode(
@@ -117,58 +192,52 @@ class TransformersLLM:
         )
         return response.strip()
 
-    def ask_json(self, transcript: str, current_state: str, schema_cls: type[BaseModel]) -> BaseModel:
+    def combined_call(self, transcript: str, current_json: str) -> CombinedOutput:
+        """
+        Single LLM call that BOTH extracts clinical data AND generates the next reply.
+        This halves latency vs. running extractor + conversationalist separately.
+        """
         self._load()
-        import torch
-        
-        system = (
-            "You are a clinical data extraction engine. "
-            "Your objective is to read the patient transcript and output exactly a valid JSON document "
-            "that matches the requested schema. Extract all relevant medical facts you can find. "
-            "Merge new facts into the existing state."
+
+        prompt = (
+            f"CURRENT CLINICAL STATE (update with any new patient info):\n{current_json}\n\n"
+            f"FULL CONVERSATION TRANSCRIPT:\n{transcript}\n\n"
+            "Instructions: Extract all new clinical facts from the transcript, merge them into the state, "
+            "and generate exactly ONE empathetic follow-up question for whatever is still missing. "
+            "Return ONLY the JSON object, no other text."
         )
-        instruction = (
-            f"CURRENT STATE JSON (Update this based on the transcript):\n{current_state}\n\n"
-            f"TRANSCRIPT:\n{transcript}\n\n"
-            f"Output ONLY valid JSON matching this schema structure:\n"
-            f"{schema_cls.model_json_schema()}"
-        )
-        
         messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": instruction},
+            {"role": "system", "content": COMBINED_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
         ]
-        text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.tokenizer(text, return_tensors="pt")
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=400,
-                temperature=0.1, # Keep low for JSON determinism
-                do_sample=False,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-        response = self.tokenizer.decode(
-            outputs[0][inputs.input_ids.shape[1]:],
-            skip_special_tokens=True,
-        )
-        
-        # Attempt to parse json from output
-        json_str = response.strip()
+
+        raw = self._infer(messages, max_tokens=350)
+
+        # Parse JSON robustly
+        json_str = raw
         if "```json" in json_str:
-            json_str = json_str.split("```json")[-1].split("```")[0]
+            json_str = json_str.split("```json", 1)[1].split("```")[0]
         elif "```" in json_str:
-            json_str = json_str.split("```")[-1].split("```")[0]
-            
+            json_str = json_str.split("```", 1)[1].split("```")[0]
+
+        # Find first { ... } block
+        start = json_str.find("{")
+        end = json_str.rfind("}") + 1
+        if start != -1 and end > start:
+            json_str = json_str[start:end]
+
         try:
             parsed = json.loads(json_str)
-            return schema_cls.model_validate(parsed)
-        except Exception:
-            # Fallback to current state if extraction fails (avoids crashing)
+            return CombinedOutput.model_validate(parsed)
+        except Exception as e:
+            print(f"[LLM] JSON parse error: {e}\nRaw output: {raw[:300]}")
+            # Return current state + error reply — never crash
             try:
-                return schema_cls.model_validate_json(current_state)
+                base = CombinedOutput.model_validate_json(current_json)
+                base.reply = "Could you please repeat that? I want to make sure I understood correctly."
+                return base
             except Exception:
-                return schema_cls()
+                return CombinedOutput(reply="Could you please repeat that?")
 
 
 _llm_instance = None

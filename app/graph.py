@@ -4,235 +4,217 @@ from typing import Optional, TypedDict, Annotated
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
-from app.llm import get_llm
-from app.schemas import ClinicalStateExtraction, ClinicalBrief, HPI
+from app.llm import get_llm, CombinedOutput
+from app.schemas import ClinicalBrief, HPI, ClinicalStateExtraction
 
 _MOCK = lambda: os.environ.get("MOCK_LLM", "true").lower() == "true"
+
 
 def add_messages(left: list[dict], right: list[dict]) -> list[dict]:
     return left + right
 
+
 class IntakeState(TypedDict):
     messages: Annotated[list[dict], add_messages]
-    clinical_state: str  # JSON representation of ClinicalStateExtraction
+    clinical_state: str          # JSON of CombinedOutput (accumulated clinical data)
     missing_fields: list[str]
     current_node: str
     clinical_brief: Optional[dict]
-    frontend_stage: str # 'intake', 'hpi', 'ros', or 'done'
+    frontend_stage: str          # 'intake', 'hpi', 'ros', 'done'
 
-# -------------------- HELPER FUNCTIONS --------------------
 
-HPI_REQUIRED = ["onset", "location", "duration", "character", "severity", "aggravating", "relieving"]
-ROS_REQUIRED_COUNT = 3
+HPI_FIELDS = ["onset", "location", "duration", "character", "severity", "aggravating", "relieving"]
+ROS_REQUIRED = 3
+
+EMERGENCY_PHRASES = [
+    "crushing chest pain", "can't breathe", "cannot breathe",
+    "heart attack", "suicide", "kill myself", "can't move", "dying"
+]
+
+
+# ------------------------------------------------------------------ helpers --
 
 def format_transcript(messages: list[dict]) -> str:
-    out = []
-    # Only send the last couple of turns to not overwhelm if it's long, but ideally all
+    lines = []
     for m in messages:
         role = "AI" if m["role"] == "assistant" else "Patient"
-        out.append(f"{role}: {m['content']}")
-    return "\n".join(out)
+        lines.append(f"{role}: {m['content']}")
+    return "\n".join(lines)
 
-def evaluate_missing(state: ClinicalStateExtraction) -> (list[str], str):
-    """
-    Returns list of missing fields and the 'frontend_stage' mapped mapping.
-    """
-    missing = []
-    stage = "intake"
-    
+
+def compute_stage(state: CombinedOutput) -> str:
     if not state.chief_complaint:
-        missing.append("chief complaint (reason for visit)")
-        return missing, stage
-        
-    stage = "hpi"
-    for field in HPI_REQUIRED:
-        val = getattr(state.hpi, field)
-        if not val or val.lower() == "not specified":
-            missing.append(f"HPI: {field}")
-            
-    if missing:
-        return missing, stage
-        
-    stage = "ros"
-    # Need at least a few systems covered if possible
-    if len(state.ros.keys()) < ROS_REQUIRED_COUNT:
-        missing.append(f"Review of Systems (ask about {ROS_REQUIRED_COUNT - len(state.ros.keys())} more bodily systems)")
-        return missing, stage
-        
-    return [], "done"
+        return "intake"
+    for f in HPI_FIELDS:
+        if not getattr(state, f):
+            return "hpi"
+    if len(state.ros) < ROS_REQUIRED:
+        return "ros"
+    return "done"
 
 
-# -------------------- NODES --------------------
+def missing_from(state: CombinedOutput) -> list[str]:
+    missing = []
+    if not state.chief_complaint:
+        missing.append("chief complaint")
+        return missing
+    for f in HPI_FIELDS:
+        if not getattr(state, f):
+            missing.append(f"HPI:{f}")
+    if len(state.ros) < ROS_REQUIRED:
+        missing.append(f"ROS ({ROS_REQUIRED - len(state.ros)} more systems needed)")
+    return missing
+
+
+# ------------------------------------------------------------------- nodes ---
 
 def triage_node(state: IntakeState) -> dict:
+    """Fast keyword check — no LLM call. Abort immediately on emergency phrases."""
     msgs = state.get("messages", [])
-    if not msgs:
-        return {"current_node": "triage"}
-    
-    last_msg = msgs[-1]
-    if last_msg["role"] == "user":
-        content = last_msg["content"].lower()
-        emergencies = ["suicide", "kill myself", "crushing chest pain", "can't breathe", "heart attack"]
-        if any(e in content for e in emergencies):
+    if msgs and msgs[-1]["role"] == "user":
+        content = msgs[-1]["content"].lower()
+        if any(p in content for p in EMERGENCY_PHRASES):
             return {
-                "messages": [{"role": "assistant", "content": "🚨 EMERGENCY OVERRIDE: Your symptoms sound like a medical emergency. Please call 911 or visit the nearest emergency room immediately."}],
+                "messages": [{
+                    "role": "assistant",
+                    "content": (
+                        "🚨 EMERGENCY: Your symptoms require immediate attention. "
+                        "Please call 911 or go to your nearest emergency room right away."
+                    )
+                }],
                 "current_node": "done",
-                "frontend_stage": "done"
+                "frontend_stage": "done",
             }
-    
-    return {"current_node": "extractor"}
+    return {"current_node": "agent"}
 
 
-def extractor_node(state: IntakeState) -> dict:
+def agent_node(state: IntakeState) -> dict:
+    """
+    Core agent node — ONE combined LLM call per turn:
+    1. Extracts any new clinical data from the transcript.
+    2. Generates the next conversational question.
+    3. If all data is collected, builds the ClinicalBrief inline (no separate scribe node).
+    """
     msgs = state.get("messages", [])
-    if not msgs:
-        # Initial state setup
-        return {
-            "clinical_state": ClinicalStateExtraction().model_dump_json(),
-            "current_node": "evaluator"
-        }
-    
-    # Only run extractor if the last message was from the user
-    if msgs[-1]["role"] != "user":
-        return {"current_node": "evaluator"}
-        
-    llm = get_llm()
-    transcript = format_transcript(msgs)
-    
-    current_state_json = state.get("clinical_state")
-    if not current_state_json:
-        current_state_json = ClinicalStateExtraction().model_dump_json()
-        
-    # Extractor Agent updates the state passively
-    new_state = llm.ask_json(transcript, current_state_json, ClinicalStateExtraction)
-    
-    # Check if the extractor detected a latent emergency
-    if new_state.emergency_detected:
-         return {
-            "messages": [{"role": "assistant", "content": "🚨 EMERGENCY OVERRIDE: Based on your details, you require immediate medical attention. Call 911."}],
-            "current_node": "done",
-            "frontend_stage": "done",
-            "clinical_state": new_state.model_dump_json()
-        }
-    
-    return {
-        "clinical_state": new_state.model_dump_json(),
-        "current_node": "evaluator"
-    }
 
-
-def evaluator_node(state: IntakeState) -> dict:
-    state_json = state.get("clinical_state")
-    if not state_json:
-        clinical_state = ClinicalStateExtraction()
-    else:
-        clinical_state = ClinicalStateExtraction.model_validate_json(state_json)
-        
-    missing, stage = evaluate_missing(clinical_state)
-    
-    if not missing:
-        return {
-            "missing_fields": missing,
-            "frontend_stage": "done",
-            "current_node": "scribe"
-        }
-        
-    return {
-        "missing_fields": missing,
-        "frontend_stage": stage,
-        "current_node": "conversationalist"
-    }
-
-
-def conversationalist_node(state: IntakeState) -> dict:
-    msgs = state.get("messages", [])
-    clinical_json = state.get("clinical_state", "{}")
-    missing = state.get("missing_fields", [])
-    
-    if not msgs:
+    # On first call with no messages, return opening greeting
+    if not msgs or (len(msgs) == 1 and msgs[0]["role"] == "assistant"):
         return {
             "messages": [{"role": "assistant", "content": "Hello, I'm conducting your pre-visit clinical intake. What brings you in today?"}],
-            "current_node": "conversationalist"
+            "clinical_state": CombinedOutput().model_dump_json(),
+            "frontend_stage": "intake",
+            "current_node": "agent",
         }
-        
-    # Check if the agent just spoke (prevent double-speaking if no user input)
-    if msgs[-1]["role"] == "assistant":
-        return {"current_node": "conversationalist"}
 
-    # Dynamic target targeting the top missing field
-    target = missing[0] if missing else "general details"
-    
-    system_prompt = (
-        "You are an empathetic clinical intake assistant. "
-        "Your sole job is to ask the next logical medical question in a conversational way. "
-        f"We currently know this info about the patient:\n{clinical_json}\n\n"
-        f"YOUR GOAL: You MUST naturally uncover the following missing information: {target}. "
-        "Keep your response to exactly ONE question. Be concise and friendly."
-    )
-    
-    transcript = format_transcript(msgs[-6:]) # Context window
+    if msgs[-1]["role"] == "assistant":
+        return {"current_node": "agent"}
+
+    current_json = state.get("clinical_state") or CombinedOutput().model_dump_json()
+    transcript = format_transcript(msgs)
+
     llm = get_llm()
-    reply = llm.ask(f"Transcript:\n{transcript}\n\nAsk the next question about: {target}.", system=system_prompt)
-    
+    result: CombinedOutput = llm.combined_call(transcript, current_json)
+
+    if result.emergency:
+        return {
+            "messages": [{"role": "assistant", "content": (
+                "🚨 EMERGENCY: Your symptoms require immediate attention. "
+                "Please call 911 or go to your nearest emergency room right away."
+            )}],
+            "clinical_state": result.model_dump_json(),
+            "current_node": "done",
+            "frontend_stage": "done",
+        }
+
+    stage = compute_stage(result)
+    missing = missing_from(result)
+    reply = result.reply or "Could you tell me more?"
+
+    # All fields complete — build the brief inline so it's available this turn
+    if stage == "done":
+        from datetime import datetime, timezone
+        brief = ClinicalBrief(
+            chief_complaint=result.chief_complaint or "Not specified",
+            hpi=HPI(
+                onset=result.onset or "Not specified",
+                location=result.location or "Not specified",
+                duration=result.duration or "Not specified",
+                character=result.character or "Not specified",
+                severity=result.severity or "Not specified",
+                aggravating=result.aggravating or "Not specified",
+                relieving=result.relieving or "Not specified",
+            ),
+            ros=result.ros,
+            generated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
+        return {
+            "messages": [{"role": "assistant", "content": "Your clinical summary is ready. Please wait for the doctor."}],
+            "clinical_state": result.model_dump_json(),
+            "missing_fields": [],
+            "frontend_stage": "done",
+            "current_node": "done",
+            "clinical_brief": brief.model_dump(),
+        }
+
     return {
         "messages": [{"role": "assistant", "content": reply}],
-        "current_node": "conversationalist"
+        "clinical_state": result.model_dump_json(),
+        "missing_fields": missing,
+        "frontend_stage": stage,
+        "current_node": "agent",
     }
 
 
 def scribe_node(state: IntakeState) -> dict:
-    state_json = state.get("clinical_state")
-    data = ClinicalStateExtraction.model_validate_json(state_json)
-    
+    """Build the final ClinicalBrief from the accumulated CombinedOutput state."""
+    state_json = state.get("clinical_state", "{}")
+    data = CombinedOutput.model_validate_json(state_json)
+
     from datetime import datetime, timezone
-    
+
     brief = ClinicalBrief(
         chief_complaint=data.chief_complaint or "Not specified",
-        hpi=data.hpi,
+        hpi=HPI(
+            onset=data.onset or "Not specified",
+            location=data.location or "Not specified",
+            duration=data.duration or "Not specified",
+            character=data.character or "Not specified",
+            severity=data.severity or "Not specified",
+            aggravating=data.aggravating or "Not specified",
+            relieving=data.relieving or "Not specified",
+        ),
         ros=data.ros,
         generated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     )
 
     return {
-        "messages": [{"role": "assistant", "content": "Thank you — I have everything I need. Your clinical summary is ready."}],
+        "messages": [{"role": "assistant", "content": "Your clinical summary is ready. Please wait for the doctor."}],
         "current_node": "done",
+        "frontend_stage": "done",
         "clinical_brief": brief.model_dump(),
     }
 
+
+# -------------------------------------------------------------- graph build --
 
 def build_graph():
     workflow = StateGraph(IntakeState)
 
     workflow.add_node("triage", triage_node)
-    workflow.add_node("extractor", extractor_node)
-    workflow.add_node("evaluator", evaluator_node)
-    workflow.add_node("conversationalist", conversationalist_node)
-    workflow.add_node("scribe", scribe_node)
+    workflow.add_node("agent", agent_node)
 
     def route_triage(state: IntakeState) -> str:
-        # If triage marked it 'done' (emergency), skip everything
-        return state.get("current_node", "extractor")
-        
-    def route_extractor(state: IntakeState) -> str:
-        # Extractor marks it 'done' if latent emergency, else 'evaluator'
-        return state.get("current_node", "evaluator")
-        
-    def route_evaluator(state: IntakeState) -> str:
-        return state.get("current_node", "conversationalist")
+        return state.get("current_node", "agent")
 
     workflow.add_edge(START, "triage")
-    workflow.add_conditional_edges("triage", route_triage, {"done": END, "extractor": "extractor"})
-    workflow.add_conditional_edges("extractor", route_extractor, {"done": END, "evaluator": "evaluator"})
-    workflow.add_conditional_edges("evaluator", route_evaluator, {"conversationalist": "conversationalist", "scribe": "scribe"})
-    
-    workflow.add_edge("conversationalist", END)
-    workflow.add_edge("scribe", END)
+    workflow.add_conditional_edges("triage", route_triage, {"done": END, "agent": "agent"})
+    workflow.add_edge("agent", END)
 
     checkpointer = MemorySaver()
-    # Interrupt after conversationalist so it waits for user input
+    # Interrupt after agent so it pauses for user input each turn
     graph = workflow.compile(
         checkpointer=checkpointer,
-        interrupt_after=["conversationalist"]
+        interrupt_after=["agent"]
     )
 
     return graph, checkpointer
