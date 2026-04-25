@@ -147,11 +147,12 @@ class MockLLM:
 class OllamaLLM:
     def __init__(self):
         self.model_name = os.environ.get("MODEL_NAME", "qwen2.5:0.5b")
-        self.api_url = "http://localhost:11434/api/generate"
+        self.api_url = "http://localhost:11434/api/chat"
 
     def combined_call(self, transcript: str, current_json: str) -> CombinedOutput:
         """
-        Calls the local Ollama instance. Requires Ollama to be running.
+        Calls the local Ollama instance using the /chat endpoint so system tags 
+        are properly applied.
         """
         prompt = (
             f"CURRENT CLINICAL STATE (update with any new patient info):\n{current_json}\n\n"
@@ -160,8 +161,6 @@ class OllamaLLM:
             "and generate exactly ONE empathetic follow-up question for whatever is still missing. "
             "Return ONLY the JSON object, no other text."
         )
-        
-        full_prompt = f"System: {COMBINED_SYSTEM_PROMPT}\nUser: {prompt}"
 
         import time
         import requests
@@ -171,7 +170,10 @@ class OllamaLLM:
         
         payload = {
             "model": self.model_name,
-            "prompt": full_prompt,
+            "messages": [
+                {"role": "system", "content": COMBINED_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
             "format": "json",
             "stream": False,
             "options": {
