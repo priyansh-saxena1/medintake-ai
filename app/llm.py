@@ -147,73 +147,15 @@ class MockLLM:
         return CombinedOutput.model_validate(state)
 
 
-class TransformersLLM:
+class OllamaLLM:
     def __init__(self):
-        self.model = None
-        self.tokenizer = None
-        self.model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-0.5B-Instruct")
-        self._load_lock = False
-
-    def _load(self):
-        if self.model is None and not self._load_lock:
-            import time
-            t0 = time.time()
-            self._load_lock = True
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-            import torch
-            print(f"[LLM] Loading {self.model_name} into memory. This may take 5-30 secs on CPU...")
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            # Use float16 — halves memory footprint and is ~2x faster than float32 on CPU
-            dtype = torch.float16
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                torch_dtype=dtype,
-                device_map="cpu",
-                low_cpu_mem_usage=True,
-            )
-            self.model.eval()
-            print(f"[LLM] Model load complete in {time.time() - t0:.1f} seconds.")
-
-    def _infer(self, messages: list[dict], max_tokens: int = 200) -> str:
-        """Single shared inference method. Greedy decode for speed."""
-        import torch
-        import time
-        
-        t0 = time.time()
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self.tokenizer(text, return_tensors="pt")
-        tok_time = time.time() - t0
-        
-        t1 = time.time()
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                do_sample=False,         # Greedy — deterministic and fastest
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-        gen_time = time.time() - t1
-        
-        t2 = time.time()
-        response = self.tokenizer.decode(
-            outputs[0][inputs.input_ids.shape[1]:],
-            skip_special_tokens=True,
-        )
-        dec_time = time.time() - t2
-        
-        print(f"[LLM Timing] Tokens generated: {outputs.shape[1] - inputs.input_ids.shape[1]} | "
-              f"Tokenize: {tok_time:.3f}s | Infer: {gen_time:.1f}s | Decode: {dec_time:.3f}s")
-        return response.strip()
+        self.model_name = os.environ.get("MODEL_NAME", "qwen2.5:0.5b")
+        self.api_url = "http://localhost:11434/api/generate"
 
     def combined_call(self, transcript: str, current_json: str) -> CombinedOutput:
         """
-        Single LLM call that BOTH extracts clinical data AND generates the next reply.
-        This halves latency vs. running extractor + conversationalist separately.
+        Calls the local Ollama instance. Requires Ollama to be running.
         """
-        self._load()
-
         prompt = (
             f"CURRENT CLINICAL STATE (update with any new patient info):\n{current_json}\n\n"
             f"FULL CONVERSATION TRANSCRIPT:\n{transcript}\n\n"
@@ -221,16 +163,37 @@ class TransformersLLM:
             "and generate exactly ONE empathetic follow-up question for whatever is still missing. "
             "Return ONLY the JSON object, no other text."
         )
-        messages = [
-            {"role": "system", "content": COMBINED_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ]
+        
+        full_prompt = f"System: {COMBINED_SYSTEM_PROMPT}\nUser: {prompt}"
 
         import time
+        import requests
+        
         t_start = time.time()
-        print("[LLM] Starting inference call...")
-        raw = self._infer(messages, max_tokens=200)
-        print(f"[LLM] Inference completed in {time.time() - t_start:.1f} seconds total.")
+        print(f"[Ollama] Starting inference for model '{self.model_name}'...")
+        
+        payload = {
+            "model": self.model_name,
+            "prompt": full_prompt,
+            "format": "json",
+            "stream": False,
+            "options": {
+                "temperature": 0.0,
+                "num_predict": 250
+            }
+        }
+        
+        try:
+            response = requests.post(self.api_url, json=payload, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            raw = data.get("response", "")
+        except Exception as e:
+            print(f"[Ollama] ERROR calling local Ollama API: {e}")
+            print("[Ollama] Make sure Ollama is installed and running, and the model is downloaded!")
+            return CombinedOutput.model_validate_json(current_json)
+
+        print(f"[Ollama] Inference completed in {time.time() - t_start:.2f}s total.")
 
         # Parse JSON robustly
         json_str = raw
@@ -239,7 +202,6 @@ class TransformersLLM:
         elif "```" in json_str:
             json_str = json_str.split("```", 1)[1].split("```")[0]
 
-        # Find first { ... } block
         start = json_str.find("{")
         end = json_str.rfind("}") + 1
         if start != -1 and end > start:
@@ -249,8 +211,7 @@ class TransformersLLM:
             parsed = json.loads(json_str)
             return CombinedOutput.model_validate(parsed)
         except Exception as e:
-            print(f"[LLM] JSON parse error: {e}\nRaw output: {raw[:300]}")
-            # Return current state + error reply — never crash
+            print(f"[Ollama] JSON parse error: {e}\nRaw output: {raw[:300]}")
             try:
                 base = CombinedOutput.model_validate_json(current_json)
                 base.reply = "Could you please repeat that? I want to make sure I understood correctly."
@@ -265,5 +226,5 @@ def get_llm():
     global _llm_instance
     if _llm_instance is None:
         mock_mode = os.environ.get("MOCK_LLM", "true").lower() == "true"
-        _llm_instance = MockLLM() if mock_mode else TransformersLLM()
+        _llm_instance = MockLLM() if mock_mode else OllamaLLM()
     return _llm_instance

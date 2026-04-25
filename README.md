@@ -23,60 +23,45 @@ A LangGraph-based conversational agent for conducting pre-visit clinical intakes
 ## Architecture
 
 ```
-intake → hpi → ros → brief_generation → done
+Patient → triage_node → agent_node → (done or loop back for next question)
 ```
 
-### State Graph (LangGraph TypedDict)
+### Inference Engine
 
-```python
-class IntakeState(TypedDict):
-    messages: list[dict]           # conversation history
-    chief_complaint: str
-    hpi: dict                      # onset, location, duration, character, severity, aggravating, relieving
-    ros: dict[str, list[str]]      # system -> [positive findings, negative findings]
-    current_node: str
-    clinical_brief: Optional[ClinicalBrief]
-    ros_systems: list[str]
-    ros_current_index: int
-    ros_pending_system: Optional[str]
-    last_processed_message_index: int
-    vague_retry_field: Optional[str]
-```
+- **Local dev (mock)**: `MOCK_LLM=true` — regex-based MockLLM, 0ms latency
+- **Production**: `MOCK_LLM=false` — **Ollama** local server (`qwen2.5:0.5b`, C++ optimized)
+  - ~2s per turn on CPU vs 25s with raw PyTorch
 
-### Nodes
+### State Graph Nodes
 
-1. **intake_node**: Greets patient, extracts chief complaint. Moves to hpi when CC is clear.
-2. **hpi_node**: Asks OPQRST questions one at a time. Re-prompts gracefully on vague answers.
-3. **ros_node**: CONDITIONAL - scopes ROS systems based on CC (e.g., chest pain → cardiac, respiratory, GI).
-4. **brief_generator_node**: Generates Pydantic ClinicalBrief from state (no LLM call).
+1. **triage_node**: Detects acute emergency phrases → immediate 🚨 alert
+2. **agent_node**: Single LLM call — extracts all HPI/ROS fields AND generates next question  
+   When all fields complete, builds ClinicalBrief inline (no extra LLM call)
 
-## Installation
+## Deployment on Hugging Face Spaces
 
-### Local Development
+This repo is configured as a **Docker SDK Space**. On every push:
+
+1. Docker image builds — Ollama gets installed via official install script
+2. `startup.sh` starts on container boot: launches Ollama, pulls `qwen2.5:0.5b`, starts FastAPI
+3. App is live on port 7860
 
 ```bash
-# Clone repository
-git clone <repo-url>
-cd clinical-intake-agent
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run with Mock LLM (default)
-export MOCK_LLM=true
-uvicorn app.main:app --reload
-
-# Run with Real LLM (requires model download)
-export MOCK_LLM=false
-uvicorn app.main:app --reload
+# Test the Docker build locally before pushing
+docker build -t clinical-intake .
+docker run -p 7860:7860 clinical-intake
 ```
 
-### Docker (HuggingFace Spaces)
+## Local Development
 
 ```bash
-# Build and run locally
-docker build -t clinical-intake-agent .
-docker run -p 7860:7860 -e MOCK_LLM=true clinical-intake-agent
+# Fast mock mode (no model needed, instant responses)
+MOCK_LLM=true uvicorn app.main:app --reload
+
+# Real Ollama mode — requires Ollama installed at localhost:11434
+ollama serve &
+ollama pull qwen2.5:0.5b
+MOCK_LLM=false uvicorn app.main:app --reload
 ```
 
 ## Usage

@@ -1,11 +1,9 @@
 langgraph
 fastapi
-uvicorn
+uvicorn[standard]
 pydantic
+requests
 pytest
 httpx
 pytest-asyncio
 aiofiles
-transformers
-huggingface_hub
-accelerate
