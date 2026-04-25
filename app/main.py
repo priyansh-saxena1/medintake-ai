@@ -8,7 +8,9 @@ from pydantic import BaseModel
 from app.graph import build_graph
 from app.schemas import ClinicalBrief
 from langgraph.types import Command
-
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import os
 
 class ChatRequest(BaseModel):
     session_id: str
@@ -22,6 +24,13 @@ class ChatResponse(BaseModel):
 
 
 app = FastAPI(title="Clinical Intake Agent")
+
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+@app.get("/")
+async def root():
+    return FileResponse("app/static/index.html")
+
 
 graph, checkpointer = build_graph()
 
