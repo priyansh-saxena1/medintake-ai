@@ -1,6 +1,29 @@
 from typing import Optional, TypedDict, Annotated
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
+import os
+from app.llm import get_llm
+
+_MOCK = lambda: os.environ.get("MOCK_LLM", "true").lower() == "true"
+
+SYSTEM_PROMPT = """
+You are a clinical intake assistant.
+
+Rules:
+- Ask exactly ONE question at a time
+- Keep responses under 20 words
+- Be clear and direct
+- No explanations unless asked
+"""
+
+
+def _ask(prompt: str) -> str:
+    llm = get_llm()
+    try:
+        return llm.ask(prompt, system=SYSTEM_PROMPT)
+    except TypeError:
+        # fallback if system param not supported
+        return llm.ask(prompt)
 
 
 def add_messages(left: list[dict], right: list[dict]) -> list[dict]:
@@ -38,9 +61,9 @@ HPI_FIELD_CONTEXT = {
     "location": "where exactly you feel it",
     "duration": "how long each episode lasts",
     "character": "what the pain feels like",
-    "severity": "how severe the pain is on a 1-10 scale",
-    "aggravating": "what makes your symptoms worse",
-    "relieving": "what helps relieve your symptoms",
+    "severity": "pain severity (1-10)",
+    "aggravating": "what makes symptoms worse",
+    "relieving": "what relieves symptoms",
 }
 
 CC_KEYWORDS_TO_ROS = {
@@ -85,6 +108,8 @@ def _is_vague_answer(answer: str) -> bool:
     return any(phrase in answer_lower for phrase in vague_phrases)
 
 
+# -------------------- NODES --------------------
+
 def intake_node(state: IntakeState) -> dict:
     messages = state.get("messages", [])
     last_idx = state.get("last_processed_message_index", 0)
@@ -96,23 +121,25 @@ def intake_node(state: IntakeState) -> dict:
         user_msg = messages[-1]
         if user_msg.get("role") == "user":
             cc = user_msg.get("content", "")
-            reply = f"I understand you're experiencing {cc}. Let me ask you some questions about this."
+
+            if _MOCK():
+                reply = f"I understand you're experiencing {cc}. Let me ask a few questions."
+            else:
+                reply = _ask(
+                    f"Patient says: '{cc}'. "
+                    "Reply in one short sentence. Acknowledge and say you will ask a few questions."
+                )
         else:
-            reply = "Hello, I'm conducting your pre-visit clinical intake. What brings you in today?"
+            reply = "What brings you in today?"
     elif not cc:
-        reply = "Hello, I'm conducting your pre-visit clinical intake. What brings you in today?"
+        reply = "What brings you in today?"
     else:
-        return {
-            "current_node": "hpi",
-        }
+        return {"current_node": "hpi"}
 
     return {
         "messages": [{"role": "assistant", "content": reply}],
         "chief_complaint": cc,
         "current_node": "hpi",
-        "ros_systems": state.get("ros_systems", []),
-        "ros_current_index": state.get("ros_current_index", 0),
-        "ros_pending_system": state.get("ros_pending_system"),
         "last_processed_message_index": len(messages) if has_new_user_msg else last_idx,
         "vague_retry_field": None,
     }
@@ -123,6 +150,7 @@ def hpi_node(state: IntakeState) -> dict:
     last_idx = state.get("last_processed_message_index", 0)
     hpi = dict(state.get("hpi", {}))
     vague_retry_field = state.get("vague_retry_field")
+    cc = state.get("chief_complaint", "")
 
     next_field = vague_retry_field
     if not next_field:
@@ -132,29 +160,32 @@ def hpi_node(state: IntakeState) -> dict:
                 break
 
     if next_field is None:
-        reply = "Thank you for providing that information. Now let me ask about other symptoms."
         return {
-            "messages": [{"role": "assistant", "content": reply}],
+            "messages": [{"role": "assistant", "content": "Now I’ll ask about other symptoms."}],
             "current_node": "ros",
             "last_processed_message_index": len(messages),
             "vague_retry_field": None,
         }
 
     has_new_user_msg = len(messages) > last_idx
-    
+
     if has_new_user_msg:
-        user_msg = None
-        for i in range(last_idx, len(messages)):
-            if messages[i].get("role") == "user":
-                user_msg = messages[i]
-                break
-        
+        user_msg = next((m for m in messages[last_idx:] if m["role"] == "user"), None)
+
         if user_msg:
-            answer = user_msg.get("content", "")
+            answer = user_msg["content"]
 
             if _is_vague_answer(answer):
-                field_context = HPI_FIELD_CONTEXT.get(next_field, "your symptoms")
-                reply = f"Could you be more specific about {field_context}?"
+                field_context = HPI_FIELD_CONTEXT[next_field]
+
+                if _MOCK():
+                    reply = f"Please be more specific about {field_context}."
+                else:
+                    reply = _ask(
+                        f"Patient response about {field_context} was vague. "
+                        "Ask for clarification in one short sentence."
+                    )
+
                 return {
                     "messages": [{"role": "assistant", "content": reply}],
                     "current_node": "hpi",
@@ -166,22 +197,40 @@ def hpi_node(state: IntakeState) -> dict:
 
             next_idx = HPI_FIELDS.index(next_field)
             if next_idx < len(HPI_FIELDS) - 1:
-                next_q = HPI_FIELDS[next_idx + 1]
-                reply = HPI_QUESTIONS[next_q]
-                next_node = "hpi"
-            else:
-                reply = "Thank you. Now let me ask about other associated symptoms."
-                next_node = "ros"
+                next_field = HPI_FIELDS[next_idx + 1]
+
+                if _MOCK():
+                    reply = HPI_QUESTIONS[next_field]
+                else:
+                    reply = _ask(
+                        f"Complaint: {cc}. Known info: {hpi}. "
+                        f"Ask ONE question about {HPI_FIELD_CONTEXT[next_field]}."
+                    )
+
+                return {
+                    "messages": [{"role": "assistant", "content": reply}],
+                    "hpi": hpi,
+                    "current_node": "hpi",
+                    "last_processed_message_index": len(messages),
+                    "vague_retry_field": None,
+                }
 
             return {
-                "messages": [{"role": "assistant", "content": reply}],
+                "messages": [{"role": "assistant", "content": "Now I’ll ask about other symptoms."}],
                 "hpi": hpi,
-                "current_node": next_node,
+                "current_node": "ros",
                 "last_processed_message_index": len(messages),
                 "vague_retry_field": None,
             }
 
-    reply = HPI_QUESTIONS[next_field]
+    if _MOCK():
+        reply = HPI_QUESTIONS[next_field]
+    else:
+        reply = _ask(
+            f"Complaint: {cc}. Known info: {hpi}. "
+            f"Ask ONE question about {HPI_FIELD_CONTEXT[next_field]}."
+        )
+
     return {
         "messages": [{"role": "assistant", "content": reply}],
         "current_node": "hpi",
@@ -196,153 +245,68 @@ def ros_node(state: IntakeState) -> dict:
     ros = dict(state.get("ros", {}))
     cc = state.get("chief_complaint", "")
 
-    ros_systems = state.get("ros_systems", [])
-    if not ros_systems:
-        ros_systems = get_relevant_ros_systems(cc)
-
+    ros_systems = state.get("ros_systems") or get_relevant_ros_systems(cc)
     current_idx = state.get("ros_current_index", 0)
-    pending_system = state.get("ros_pending_system")
+    pending = state.get("ros_pending_system")
 
     if current_idx >= len(ros_systems):
-        reply = "Thank you. I have enough information to generate your clinical brief."
         return {
-            "messages": [{"role": "assistant", "content": reply}],
+            "messages": [{"role": "assistant", "content": "I have enough information."}],
             "current_node": "brief_generator",
-            "ros_systems": ros_systems,
-            "ros_current_index": current_idx,
-            "ros_pending_system": None,
             "last_processed_message_index": len(messages),
-            "vague_retry_field": None,
         }
 
     has_new_user_msg = len(messages) > last_idx
 
-    if has_new_user_msg:
-        user_msg = messages[-1]
-        if user_msg.get("role") == "user":
-            answer = user_msg.get("content", "")
+    if has_new_user_msg and pending:
+        answer = messages[-1]["content"]
+        ros[pending] = [f.strip() for f in answer.split(",")]
 
-            if pending_system:
-                positive_findings = []
-                negative_findings = []
+    next_system = ros_systems[current_idx]
 
-                findings = [f.strip() for f in answer.split(",")]
-                for f in findings:
-                    f_lower = f.lower()
-                    if "no " in f_lower or "none" in f_lower:
-                        negative_findings.append(f)
-                    else:
-                        positive_findings.append(f)
+    if _MOCK():
+        reply = f"Any {next_system} symptoms? Mention present and absent."
+    else:
+        reply = _ask(
+            f"Ask about {next_system} symptoms. One short question. "
+            "Ask for both present and absent symptoms."
+        )
 
-                ros[pending_system] = positive_findings + negative_findings
-
-            if current_idx < len(ros_systems):
-                next_system = ros_systems[current_idx]
-                reply = f"Let's review your {next_system} system. Any {next_system} symptoms? Please mention what's present and what's not."
-                return {
-                    "messages": [{"role": "assistant", "content": reply}],
-                    "ros": ros,
-                    "current_node": "ros",
-                    "ros_systems": ros_systems,
-                    "ros_current_index": current_idx + 1,
-                    "ros_pending_system": next_system,
-                    "last_processed_message_index": len(messages),
-                    "vague_retry_field": None,
-                }
-            else:
-                reply = "Thank you. I have enough information."
-                return {
-                    "messages": [{"role": "assistant", "content": reply}],
-                    "ros": ros,
-                    "current_node": "brief_generator",
-                    "ros_systems": ros_systems,
-                    "ros_current_index": current_idx,
-                    "ros_pending_system": None,
-                    "last_processed_message_index": len(messages),
-                    "vague_retry_field": None,
-                }
-
-    if current_idx < len(ros_systems):
-        next_system = ros_systems[current_idx]
-        reply = f"Let's start with your {next_system} system. Any {next_system} symptoms? Please mention what's present and what's not."
-        return {
-            "messages": [{"role": "assistant", "content": reply}],
-            "current_node": "ros",
-            "ros_systems": ros_systems,
-            "ros_current_index": current_idx + 1,
-            "ros_pending_system": next_system,
-            "last_processed_message_index": last_idx,
-            "vague_retry_field": None,
-        }
-
-    reply = "Continuing review of systems..."
     return {
         "messages": [{"role": "assistant", "content": reply}],
+        "ros": ros,
         "current_node": "ros",
         "ros_systems": ros_systems,
-        "ros_current_index": current_idx,
-        "ros_pending_system": None,
-        "last_processed_message_index": last_idx,
-        "vague_retry_field": None,
+        "ros_current_index": current_idx + 1,
+        "ros_pending_system": next_system,
+        "last_processed_message_index": len(messages),
     }
 
+
+# -------------------- FINAL --------------------
 
 from datetime import datetime, timezone
 from app.schemas import HPI as HPIModel, ClinicalBrief as ClinicalBriefModel
 
 
 def brief_generator_node(state: IntakeState) -> dict:
-    ros = state.get("ros", {})
-    hpi_data = state.get("hpi", {})
-
-    hpi_obj = HPIModel(
-        onset=hpi_data.get("onset") or "not specified",
-        location=hpi_data.get("location") or "not specified",
-        duration=hpi_data.get("duration") or "not specified",
-        character=hpi_data.get("character") or "not specified",
-        severity=hpi_data.get("severity") or "not specified",
-        aggravating=hpi_data.get("aggravating") or "not specified",
-        relieving=hpi_data.get("relieving") or "not specified",
-    )
+    hpi_obj = HPIModel(**{f: state.get("hpi", {}).get(f) or "not specified" for f in HPI_FIELDS})
 
     brief = ClinicalBriefModel(
         chief_complaint=state.get("chief_complaint", ""),
         hpi=hpi_obj,
-        ros=ros,
+        ros=state.get("ros", {}),
         generated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     )
 
-    reply = "Your clinical intake is complete. Here is your summary."
     return {
-        "messages": [{"role": "assistant", "content": reply}],
+        "messages": [{"role": "assistant", "content": "Intake complete. Here is your summary."}],
         "current_node": "done",
         "clinical_brief": brief.model_dump(),
-        "ros_systems": state.get("ros_systems", []),
-        "ros_current_index": state.get("ros_current_index", 0),
-        "ros_pending_system": None,
-        "last_processed_message_index": len(state.get("messages", [])),
-        "vague_retry_field": None,
     }
 
 
-def route_from_intake(state: IntakeState) -> str:
-    return "hpi"
-
-
-def route_from_hpi(state: IntakeState) -> str:
-    hpi = state.get("hpi", {})
-    all_filled = all(hpi.get(f) for f in HPI_FIELDS)
-    return "ros" if all_filled else "hpi"
-
-
-def route_from_ros(state: IntakeState) -> str:
-    ros_systems = state.get("ros_systems", [])
-    current_index = state.get("ros_current_index", 0)
-    all_processed = current_index >= len(ros_systems)
-    return "brief_generator" if all_processed else "ros"
-
-
-def build_graph() -> tuple:
+def build_graph():
     workflow = StateGraph(IntakeState)
 
     workflow.add_node("intake", intake_node)
@@ -351,12 +315,12 @@ def build_graph() -> tuple:
     workflow.add_node("brief_generator", brief_generator_node)
 
     workflow.add_edge(START, "intake")
-    workflow.add_conditional_edges("intake", route_from_intake, {"hpi": "hpi"})
-    workflow.add_conditional_edges("hpi", route_from_hpi, {"hpi": "hpi", "ros": "ros"})
-    workflow.add_conditional_edges("ros", route_from_ros, {"ros": "ros", "brief_generator": "brief_generator"})
+    workflow.add_edge("intake", "hpi")
+    workflow.add_edge("hpi", "ros")
+    workflow.add_edge("ros", "brief_generator")
     workflow.add_edge("brief_generator", END)
 
     checkpointer = MemorySaver()
-    graph = workflow.compile(checkpointer=checkpointer, interrupt_after=["intake", "hpi", "ros"])
+    graph = workflow.compile(checkpointer=checkpointer)
 
     return graph, checkpointer

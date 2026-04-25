@@ -6,3 +6,6 @@ pytest
 httpx
 pytest-asyncio
 aiofiles
+transformers
+huggingface_hub
+accelerate
