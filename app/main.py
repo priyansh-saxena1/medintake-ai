@@ -36,12 +36,12 @@ graph, checkpointer = build_graph()
 
 
 def get_current_node(session_id: str) -> str:
-    """Get current node from checkpoint."""
+    """Get frontend stage from checkpoint."""
     config = {"configurable": {"thread_id": session_id}}
     try:
         snapshot = graph.get_state(config)
         if snapshot and snapshot.values:
-            return snapshot.values.get("current_node", "intake")
+            return snapshot.values.get("frontend_stage", "intake")
     except Exception:
         pass
     return "intake"

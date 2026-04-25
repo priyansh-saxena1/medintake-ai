@@ -1,18 +1,23 @@
-from pydantic import BaseModel
-
+from typing import Optional, Dict, List
+from pydantic import BaseModel, Field
 
 class HPI(BaseModel):
-    onset: str
-    location: str
-    duration: str
-    character: str
-    severity: str
-    aggravating: str
-    relieving: str
-
+    onset: Optional[str] = Field(None, description="When the symptom started")
+    location: Optional[str] = Field(None, description="Where exactly the symptom is located")
+    duration: Optional[str] = Field(None, description="How long episodes last or if it is constant")
+    character: Optional[str] = Field(None, description="What the pain feels like (sharp, dull, pressure, etc.)")
+    severity: Optional[str] = Field(None, description="Pain scale severity (e.g., 7/10 or 'severe')")
+    aggravating: Optional[str] = Field(None, description="What makes the symptoms worse")
+    relieving: Optional[str] = Field(None, description="What helps relieve the symptoms")
 
 class ClinicalBrief(BaseModel):
     chief_complaint: str
     hpi: HPI
-    ros: dict[str, list[str]]
+    ros: Dict[str, List[str]]
     generated_at: str
+
+class ClinicalStateExtraction(BaseModel):
+    chief_complaint: Optional[str] = Field(None, description="The main reason for the visit")
+    hpi: HPI = Field(default_factory=HPI)
+    ros: Dict[str, List[str]] = Field(default_factory=dict, description="Review of systems, keys are system names, values are list of findings (positive or negative)")
+    emergency_detected: bool = Field(False, description="True ONLY if the patient mentions life-threatening symptoms requiring immediate 911/ER like severe crushing chest pain radiating to jaw, active severe bleeding, or suicidal ideation")
