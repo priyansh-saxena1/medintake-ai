@@ -135,17 +135,40 @@ def agent_node(state: IntakeState) -> dict:
 
     # ── Loop Guard: if LLM returned same reply as last turn, force-fill stuck field ──
     if _detect_repeat({"messages": msgs + [{"role": "assistant", "content": result.reply}]}):
-        for stuck_field in HPI_FIELDS:
-            if getattr(result, stuck_field, None) is None:
-                object.__setattr__(result, stuck_field, "not specified")
-                print(f"[LoopGuard] Force-filled '{stuck_field}' = 'not specified' to break repeat loop")
-                # Recompute the reply so user sees a NEW question, not the repeated one
-                new_missing = missing_from(result)
-                if new_missing:
-                    object.__setattr__(result, "reply", f"Thank you. Now, could you tell me about {new_missing[0].replace('HPI:', '')}?")
-                else:
-                    object.__setattr__(result, "reply", "Thank you — I have everything I need.")
-                break
+        hpi_filled = all(getattr(result, f, None) for f in HPI_FIELDS)
+
+        if not hpi_filled:
+            # Still in HPI — force-fill the first empty HPI field
+            for stuck_field in HPI_FIELDS:
+                if getattr(result, stuck_field, None) is None:
+                    object.__setattr__(result, stuck_field, "not specified")
+                    print(f"[LoopGuard] Force-filled HPI '{stuck_field}' = 'not specified' to break repeat loop")
+                    new_missing = missing_from(result)
+                    if new_missing:
+                        object.__setattr__(result, "reply", f"Thank you. Now, could you tell me about {new_missing[0].replace('HPI:', '')}?")
+                    else:
+                        object.__setattr__(result, "reply", "Thank you — I have everything I need.")
+                    break
+        else:
+            # In ROS stage — force-fill the current ROS system with patient's last answer
+            patient_answer = ""
+            for m in reversed(msgs):
+                if m.get("role") == "user":
+                    patient_answer = m.get("content", "denied")
+                    break
+            patient_answer = patient_answer or "denied"
+
+            # Find which ROS system the LLM was asking about (from its repeated reply)
+            ros = dict(result.ros) if result.ros else {}
+            ros_label = f"patient_reported_{len(ros) + 1}"
+            ros[ros_label] = [patient_answer]
+            object.__setattr__(result, "ros", ros)
+            print(f"[LoopGuard] Force-filled ROS '{ros_label}' = ['{patient_answer}'] to break ROS repeat loop")
+
+            if len(ros) < ROS_REQUIRED:
+                object.__setattr__(result, "reply", f"Thank you. Are there any other symptoms you've been experiencing?")
+            else:
+                object.__setattr__(result, "reply", "Thank you — I have everything I need.")
 
     # ── ROS Hallucination Guard: LLM can only ADD one new ROS system per turn ──
     try:
