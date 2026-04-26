@@ -132,6 +132,12 @@ def agent_node(state: IntakeState) -> dict:
             if getattr(result, stuck_field, None) is None:
                 object.__setattr__(result, stuck_field, "not specified")
                 print(f"[LoopGuard] Force-filled '{stuck_field}' = 'not specified' to break repeat loop")
+                # Recompute the reply so user sees a NEW question, not the repeated one
+                new_missing = missing_from(result)
+                if new_missing:
+                    object.__setattr__(result, "reply", f"Thank you. Now, could you tell me about {new_missing[0].replace('HPI:', '')}?")
+                else:
+                    object.__setattr__(result, "reply", "Thank you — I have everything I need.")
                 break
 
     print(f"[{time.time():.3f}] [Graph Node] LLM returned. Preparing node dictionaries...")

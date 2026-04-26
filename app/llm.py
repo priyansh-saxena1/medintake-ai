@@ -18,14 +18,14 @@ CRITICAL RULES:
 
 OUTPUT FORMAT (strictly follow this, no extra text):
 {
-  "chief_complaint": "...",
-  "onset": "...",
-  "location": "...",
-  "duration": "...",
-  "character": "...",
-  "severity": "...",
-  "aggravating": "...",
-  "relieving": "...",
+  "chief_complaint": "the main symptom or reason for visit",
+  "onset": "when the symptom started",
+  "location": "where in the body",
+  "duration": "how long it has lasted, constant or intermittent",
+  "character": "quality of pain: sharp, dull, tightening, pressure, burning, squeezing, etc.",
+  "severity": "how bad, e.g. mild, moderate, severe, or a number out of 10",
+  "aggravating": "what makes it worse",
+  "relieving": "what makes it better or go away",
   "ros": {"system_name": ["finding1", "finding2"]},
   "reply": "The single question to ask the patient next"
 }
