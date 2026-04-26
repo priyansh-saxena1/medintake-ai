@@ -1,4 +1,4 @@
-# app/graph.py  — complete file
+# app/graph.py — fixed version
 
 import os
 import json
@@ -10,6 +10,12 @@ from app.llm import get_llm, CombinedOutput, HPI_FIELDS, ROS_REQUIRED
 from app.schemas import ClinicalBrief, HPI, ClinicalStateExtraction
 
 _MOCK = lambda: os.environ.get("MOCK_LLM", "true").lower() == "true"
+
+# Non-answers that should NOT be stored as ROS findings
+_ROS_SKIP_WORDS = frozenset({
+    "next", "skip", "ok", "okay", "yes", "no", "sure", "continue",
+    "move on", "go on", "proceed", "nothing", "none", "nope", "yep"
+})
 
 
 def add_messages(left: list[dict], right: list[dict]) -> list[dict]:
@@ -30,15 +36,14 @@ EMERGENCY_PHRASES = [
     "heart attack", "suicide", "kill myself", "can't move", "dying"
 ]
 
-# ── Natural-language question for each HPI field (used by LoopGuard reply-fix) ──
 _HPI_NEXT_Q = {
-    "onset":       "when did the symptom start?",
-    "location":    "where exactly in your body do you feel it?",
-    "duration":    "how long has it been lasting?",
-    "character":   "how would you describe the quality of the pain (sharp, dull, pressure...)?",
-    "severity":    "how severe is it on a scale of 1 to 10?",
-    "aggravating": "what makes it worse?",
-    "relieving":   "what makes it better?",
+    "onset":       "When did the symptom start?",
+    "location":    "Where exactly in your body do you feel it?",
+    "duration":    "How long has it been lasting?",
+    "character":   "How would you describe the quality of the pain — sharp, dull, pressure?",
+    "severity":    "How severe is it on a scale of 1 to 10?",
+    "aggravating": "What makes it worse?",
+    "relieving":   "What makes it better?",
 }
 
 
@@ -77,21 +82,32 @@ def missing_from(state: CombinedOutput) -> list[str]:
 
 
 def _count_hpi_filled(cs: CombinedOutput) -> int:
-    """Count how many of chief_complaint + HPI_FIELDS are non-None."""
     return sum(1 for f in ["chief_complaint"] + HPI_FIELDS if getattr(cs, f))
 
 
 def _detect_repeat(state) -> bool:
-    """Return True if the last two assistant replies are identical."""
     msgs = state.get("messages", [])
-    assistant_replies = [m.get("content", "") for m in msgs if m.get("role") == "assistant"]
-    return len(assistant_replies) >= 2 and assistant_replies[-1] == assistant_replies[-2]
+    replies = [m.get("content", "") for m in msgs if m.get("role") == "assistant"]
+    return len(replies) >= 2 and replies[-1] == replies[-2]
+
+
+def _is_valid_ros_finding(text: str) -> bool:
+    """
+    FIX: Reject bare non-answers so we never store 'next' or 'yes' as a finding.
+    A valid finding must contain a medically descriptive word or be a negation phrase.
+    """
+    t = text.strip().lower()
+    if t in _ROS_SKIP_WORDS:
+        return False
+    # Also reject single bare words that are just affirmations
+    if len(t.split()) == 1 and t in {"y", "n", "nah", "yup", "uh", "hmm"}:
+        return False
+    return True
 
 
 # ------------------------------------------------------------------- nodes ---
 
 def triage_node(state: IntakeState) -> dict:
-    """Fast keyword check — no LLM call. Abort immediately on emergency phrases."""
     msgs = state.get("messages", [])
     if msgs and msgs[-1]["role"] == "user":
         content = msgs[-1]["content"].lower()
@@ -111,12 +127,7 @@ def triage_node(state: IntakeState) -> dict:
 
 
 def agent_node(state: IntakeState) -> dict:
-    """
-    Core agent node — ONE combined LLM call per turn:
-    1. Extracts any new clinical data from the transcript.
-    2. Generates the next conversational question.
-    3. If all data is collected, builds the ClinicalBrief inline.
-    """
+    import time
     msgs = state.get("messages", [])
 
     if not msgs or (len(msgs) == 1 and msgs[0]["role"] == "assistant"):
@@ -140,13 +151,11 @@ def agent_node(state: IntakeState) -> dict:
         pre_state = CombinedOutput()
         current_stage = "intake"
 
-    import time
     print(f"[{time.time():.3f}] [Graph Node] Requesting LLM inference (stage={current_stage})...")
 
     llm = get_llm()
     result: CombinedOutput = llm.combined_call(transcript, current_json, stage=current_stage)
 
-    # ── Load previous state once — used by LoopGuard AND ROSGuard ──
     try:
         prev_cs = CombinedOutput.model_validate_json(current_json)
         prev_ros = prev_cs.ros or {}
@@ -157,85 +166,85 @@ def agent_node(state: IntakeState) -> dict:
         prev_hpi_count = 0
 
     curr_hpi_count = _count_hpi_filled(result)
-    new_hpi_extracted = curr_hpi_count > prev_hpi_count   # ← KEY: did this turn add new data?
+    new_hpi_extracted = curr_hpi_count > prev_hpi_count
 
     # ── Loop Guard ──────────────────────────────────────────────────────────
     if _detect_repeat({"messages": msgs + [{"role": "assistant", "content": result.reply}]}):
 
         if new_hpi_extracted:
-            # ----------------------------------------------------------------
-            # LLM correctly extracted data BUT gave a stale/repeated reply.
-            # FIX: advance the reply to the next missing field — do NOT force-fill.
-            # ----------------------------------------------------------------
             new_missing = missing_from(result)
             if new_missing:
                 m = new_missing[0]
                 if m.startswith("HPI:"):
                     next_field = m.replace("HPI:", "")
-                    next_q = _HPI_NEXT_Q.get(next_field, f"tell me about {next_field}")
-                    fixed_reply = f"Thank you. {next_q.capitalize()}"
+                    fixed_reply = _HPI_NEXT_Q.get(next_field, f"Can you tell me about {next_field}?")
                 else:
-                    # Transition to ROS
                     fixed_reply = "Thank you — that covers the history. Now I'd like to ask about a few related body systems."
             else:
                 fixed_reply = "Thank you — I have everything I need."
-
             object.__setattr__(result, "reply", fixed_reply)
-            print(f"[LoopGuard] Reply-only fix applied (new data was extracted). New reply: '{fixed_reply}'")
+            print(f"[LoopGuard] Reply-only fix. New reply: '{fixed_reply}'")
 
         else:
-            # ----------------------------------------------------------------
-            # LLM extracted nothing new AND repeated itself — truly stuck.
-            # Force-fill the first missing HPI field, then move on.
-            # ----------------------------------------------------------------
             hpi_filled = all(getattr(result, f, None) for f in HPI_FIELDS)
 
             if not hpi_filled:
                 for stuck_field in HPI_FIELDS:
                     if getattr(result, stuck_field, None) is None:
                         object.__setattr__(result, stuck_field, "not specified")
-                        print(f"[LoopGuard] Force-filled HPI '{stuck_field}' = 'not specified' to break repeat loop")
+                        print(f"[LoopGuard] Force-filled HPI '{stuck_field}' = 'not specified'")
                         new_missing = missing_from(result)
                         if new_missing:
                             m = new_missing[0]
                             if m.startswith("HPI:"):
                                 next_field = m.replace("HPI:", "")
-                                next_q = _HPI_NEXT_Q.get(next_field, f"tell me about {next_field}")
-                                object.__setattr__(result, "reply", f"Understood. {next_q.capitalize()}")
+                                fixed_reply = _HPI_NEXT_Q.get(next_field, f"Can you tell me about {next_field}?")
                             else:
-                                object.__setattr__(result, "reply", "Thank you — that covers the history. Now I'd like to ask about a few related body systems.")
+                                fixed_reply = "Thank you — that covers the history. Now I'd like to ask about a few related body systems."
                         else:
-                            object.__setattr__(result, "reply", "Thank you — I have everything I need.")
+                            fixed_reply = "Thank you — I have everything I need."
+                        object.__setattr__(result, "reply", fixed_reply)
                         break
             else:
-                # ROS stuck — use the patient's last answer as a finding
+                # ── FIX: ROS stuck — only store answer if it's a real clinical finding ──
                 patient_answer = ""
                 for m in reversed(msgs):
                     if m.get("role") == "user":
-                        patient_answer = m.get("content", "denied")
+                        patient_answer = m.get("content", "").strip()
                         break
-                patient_answer = patient_answer or "denied"
 
                 ros = dict(prev_ros)
-                ros_label = f"patient_reported_{len(ros) + 1}"
-                ros[ros_label] = [patient_answer]
-                object.__setattr__(result, "ros", ros)
-                print(f"[LoopGuard] Force-filled ROS '{ros_label}' = ['{patient_answer}'] to break ROS repeat loop")
-
-                if len(ros) < ROS_REQUIRED:
-                    object.__setattr__(result, "reply", "Thank you. Are there any other symptoms you've been experiencing?")
+                if _is_valid_ros_finding(patient_answer):
+                    ros_label = f"patient_reported_{len(ros) + 1}"
+                    ros[ros_label] = [patient_answer]
+                    object.__setattr__(result, "ros", ros)
+                    print(f"[LoopGuard] Force-filled ROS '{ros_label}' = ['{patient_answer}']")
                 else:
+                    # Non-answer: skip filling, just ask the next ROS question
+                    print(f"[LoopGuard] Non-answer '{patient_answer}' skipped — asking next ROS question")
+                    object.__setattr__(result, "reply", "Are there any other symptoms you've been experiencing?")
+
+                if len(ros) >= ROS_REQUIRED:
                     object.__setattr__(result, "reply", "Thank you — I have all the information I need.")
 
-    # ── ROS Hallucination Guard: LLM can only ADD one new ROS system per turn ──
+    # ── ROS Hallucination Guard ──────────────────────────────────────────────
     new_ros_keys = [k for k in result.ros if k not in prev_ros]
     if len(new_ros_keys) > 1:
-        print(f"[ROSGuard] LLM added {len(new_ros_keys)} new ROS systems in one turn: {new_ros_keys}. Keeping only first.")
+        print(f"[ROSGuard] LLM added {len(new_ros_keys)} ROS systems at once. Keeping first only.")
         allowed_ros = dict(prev_ros)
         allowed_ros[new_ros_keys[0]] = result.ros[new_ros_keys[0]]
         object.__setattr__(result, "ros", allowed_ros)
 
-    print(f"[{time.time():.3f}] [Graph Node] LLM returned. Preparing node dictionaries...")
+    # ── FIX: Filter out non-answer ROS findings added by the raw LLM ────────
+    cleaned_ros = {}
+    for sys_name, findings in result.ros.items():
+        valid = [f for f in findings if _is_valid_ros_finding(f)]
+        # Only keep systems that have at least one real finding, OR were in prev_ros
+        if valid or sys_name in prev_ros:
+            cleaned_ros[sys_name] = valid if valid else findings
+    object.__setattr__(result, "ros", cleaned_ros)
+
+    print(f"[{time.time():.3f}] [Graph Node] LLM returned.")
 
     stage = compute_stage(result)
     missing = missing_from(result)
@@ -243,20 +252,34 @@ def agent_node(state: IntakeState) -> dict:
 
     if stage == "done":
         from datetime import datetime, timezone
+
+        hpi_obj = HPI(
+            onset=result.onset or "Not specified",
+            location=result.location or "Not specified",
+            duration=result.duration or "Not specified",
+            character=result.character or "Not specified",
+            severity=result.severity or "Not specified",
+            aggravating=result.aggravating or "Not specified",
+            relieving=result.relieving or "Not specified",
+        )
+
+        brief_data = {
+            "chief_complaint": result.chief_complaint or "Not specified",
+            "hpi": hpi_obj.model_dump(),
+            "ros": result.ros,
+        }
+
+        # ── FIX 3: Generate a proper clinical narrative ───────────────────────
+        narrative = llm.generate_brief_narrative(brief_data)
+
         brief = ClinicalBrief(
             chief_complaint=result.chief_complaint or "Not specified",
-            hpi=HPI(
-                onset=result.onset or "Not specified",
-                location=result.location or "Not specified",
-                duration=result.duration or "Not specified",
-                character=result.character or "Not specified",
-                severity=result.severity or "Not specified",
-                aggravating=result.aggravating or "Not specified",
-                relieving=result.relieving or "Not specified",
-            ),
+            hpi=hpi_obj,
             ros=result.ros,
             generated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            narrative=narrative,
         )
+
         return {
             "messages": [{"role": "assistant", "content": "Your clinical summary is ready. Please wait for the doctor."}],
             "clinical_state": result.model_dump_json(),
@@ -275,11 +298,8 @@ def agent_node(state: IntakeState) -> dict:
     }
 
 
-# -------------------------------------------------------------- graph build --
-
 def build_graph():
     workflow = StateGraph(IntakeState)
-
     workflow.add_node("triage", triage_node)
     workflow.add_node("agent", agent_node)
 
@@ -291,9 +311,5 @@ def build_graph():
     workflow.add_edge("agent", END)
 
     checkpointer = MemorySaver()
-    graph = workflow.compile(
-        checkpointer=checkpointer,
-        interrupt_after=["agent"]
-    )
-
+    graph = workflow.compile(checkpointer=checkpointer, interrupt_after=["agent"])
     return graph, checkpointer
