@@ -5,7 +5,8 @@ from pydantic import BaseModel
 
 COMBINED_SYSTEM_PROMPT = """You are a clinical intake assistant AI. You have two jobs per turn:
 
-JOB 1 (EXTRACT): Read the FULL conversation and update the clinical JSON state with any new information the patient provided. Only extract facts explicitly stated.
+JOB 1 (EXTRACT): Read the FULL conversation and update the clinical JSON state with any new information the patient provided.
+CRITICAL: If the patient denies a symptom, or replies with "none", "zero", "no", or "nothing", you MUST extract that exact word (e.g. "zero"). DO NOT leave it null if the patient has answered the question negatively.
 
 JOB 2 (RESPOND): Based on what is STILL MISSING from the clinical state, ask the patient ONE natural, empathetic question. Do NOT ask about things already filled in.
 
@@ -29,7 +30,13 @@ OUTPUT FORMAT (strictly follow this, no extra text):
   "reply": "The single question to ask the patient next"
 }
 
-Use null for any field not yet known. Keep existing values if the patient didn't add new info."""
+Use null for any field not yet known. Keep existing values if the patient didn't add new info.
+
+IMPORTANT — ACCEPTING VAGUE ANSWERS:
+- If the patient gives ANY answer (even "none", "zero", "not sure", "it goes away", "very mild"), that IS a valid value. Store it as a string.
+- For relieving/aggravating: if patient implies rest helps (e.g. "very mild when not running", "zero at rest"), set relieving="rest" and aggravating="physical activity/running".
+- Do NOT ask the same question twice. If the patient has answered (even vaguely), move on to the next missing field.
+- "zero", "none", "not really", "it's fine otherwise" → treat as valid answer, fill the field."""
 
 
 class CombinedOutput(BaseModel):
@@ -209,6 +216,12 @@ class OllamaLLM:
 
         try:
             parsed = json.loads(json_str)
+            # Coerce empty strings and literal "null" back to None
+            for field in ["chief_complaint", "onset", "location", "duration",
+                          "character", "severity", "aggravating", "relieving"]:
+                v = parsed.get(field)
+                if v is not None and str(v).strip() in ("", "null"):
+                    parsed[field] = None
             return CombinedOutput.model_validate(parsed)
         except Exception as e:
             print(f"[Ollama] JSON parse error: {e}\nRaw output: {raw[:300]}")

@@ -66,6 +66,13 @@ def missing_from(state: CombinedOutput) -> list[str]:
     return missing
 
 
+def _detect_repeat(state) -> bool:
+    """Return True if the last two assistant replies are identical."""
+    msgs = state.get("messages", [])
+    assistant_replies = [m.get("content", "") for m in msgs if m.get("role") == "assistant"]
+    return len(assistant_replies) >= 2 and assistant_replies[-1] == assistant_replies[-2]
+
+
 # ------------------------------------------------------------------- nodes ---
 
 def triage_node(state: IntakeState) -> dict:
@@ -118,6 +125,14 @@ def agent_node(state: IntakeState) -> dict:
 
     llm = get_llm()
     result: CombinedOutput = llm.combined_call(transcript, current_json)
+
+    # ── Loop Guard: if LLM returned same reply as last turn, force-fill stuck field ──
+    if _detect_repeat({"messages": msgs + [{"role": "assistant", "content": result.reply}]}):
+        for stuck_field in HPI_FIELDS:
+            if getattr(result, stuck_field, None) is None:
+                object.__setattr__(result, stuck_field, "not specified")
+                print(f"[LoopGuard] Force-filled '{stuck_field}' = 'not specified' to break repeat loop")
+                break
 
     print(f"[{time.time():.3f}] [Graph Node] LLM returned. Preparing node dictionaries...")
 
