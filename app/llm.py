@@ -2,47 +2,39 @@ import os
 import json
 from pydantic import BaseModel
 
-INTAKE_PROMPT = """You are a clinical intake assistant. The patient just arrived.
+# ── Single unified system prompt — LLM sees the full workflow ──
+SYSTEM_PROMPT = """You are a clinical intake assistant conducting a pre-visit patient interview.
 
-JOB: Extract the chief complaint from the conversation. Ask ONE simple question to identify their main symptom.
+YOUR WORKFLOW (follow this order):
+1. INTAKE: Identify the patient's chief complaint (main reason for visit).
+2. HPI (History of Present Illness): Collect these fields ONE AT A TIME, in order:
+   - onset: when the symptom started
+   - location: where in the body
+   - duration: how long it has lasted
+   - character: quality (sharp, dull, pressure, burning, etc.)
+   - severity: how bad on a scale of 1-10
+   - aggravating: what makes it worse
+   - relieving: what makes it better
+3. ROS (Review of Systems): Screen 3 body systems RELEVANT to the chief complaint.
+   Examples of relevant systems:
+   - Leg/knee/joint pain → musculoskeletal, neurological, vascular
+   - Chest pain → cardiac, respiratory, gi
+   - Headache → neurological, ophthalmologic, ent
+   - Abdominal pain → gi, genitourinary, musculoskeletal
+   - Back pain → musculoskeletal, neurological, genitourinary
+4. DONE: When all HPI fields AND 3 ROS systems are filled, set reply to "Your clinical summary is ready. Please wait for the doctor."
 
-RULES:
-- Output ONLY valid JSON.
-- If you already know the chief complaint, ask about onset to move forward.
-- Do NOT diagnose or give medical advice.
-
-OUTPUT FORMAT:
-{
-  "chief_complaint": "the main symptom" or null,
-  "onset": null, "location": null, "duration": null,
-  "character": null, "severity": null, "aggravating": null, "relieving": null,
-  "ros": {},
-  "reply": "Your question to the patient"
-}"""
-
-HPI_PROMPT = """You are a clinical intake assistant collecting History of Present Illness (HPI) using OLDCARTS.
-
-JOB 1 (EXTRACT): Read the conversation and update the JSON with any new patient info. If a patient denies something or says "none"/"zero"/"no", store that exact word — do NOT leave it null.
-
-JOB 2 (RESPOND): Ask ONE question about the FIRST missing field below. Do NOT re-ask fields already filled.
-
-FIELDS TO COLLECT (in order):
-- onset: when the symptom started
-- location: where in the body
-- duration: how long it has lasted
-- character: quality of pain (sharp, dull, pressure, burning, etc.)
-- severity: how bad on a scale of 1-10
-- aggravating: what makes it worse
-- relieving: what makes it better
-
-RULES:
+CRITICAL RULES:
+- NEVER re-ask a field that is already filled (marked ✅ in the status).
+- Ask exactly ONE question per turn about the FIRST missing item.
+- If a patient says "none"/"zero"/"no"/"denied", store that exact answer — do NOT leave it null.
+- For ROS: store findings as a list, e.g. "musculoskeletal": ["joint stiffness", "no swelling"].
+- Do NOT ask emotional/psychological questions — stick to physical symptoms.
 - Output ONLY valid JSON, no extra text.
-- Ask exactly ONE question per turn.
-- Keep existing values. Use null for unknowns.
 
 OUTPUT FORMAT:
 {
-  "chief_complaint": "...",
+  "chief_complaint": "..." or null,
   "onset": "..." or null,
   "location": "..." or null,
   "duration": "..." or null,
@@ -50,49 +42,68 @@ OUTPUT FORMAT:
   "severity": "..." or null,
   "aggravating": "..." or null,
   "relieving": "..." or null,
-  "ros": {},
+  "ros": {"system_name": ["finding1", "finding2"], ...},
+  "emergency": false,
   "reply": "Your single question"
 }"""
 
-ROS_PROMPT = """You are a clinical intake assistant performing a Review of Systems (ROS).
-
-All HPI fields are already collected. Now you must screen for symptoms in OTHER body systems that are RELEVANT to the patient's chief complaint.
-
-JOB 1 (EXTRACT): The patient just answered a question about a body system. Extract their answer into the "ros" dict under the appropriate system key (e.g. "musculoskeletal": ["joint stiffness", "no swelling"]).
-
-JOB 2 (RESPOND): Ask about the NEXT relevant body system that is NOT yet in the "ros" dict.
-
-CHOOSING SYSTEMS: Pick 3 systems that are clinically relevant to the chief complaint. Examples:
-- Leg/knee/joint pain → musculoskeletal, neurological, vascular
-- Chest pain → cardiac, respiratory, gi
-- Headache → neurological, ophthalmologic, ent
-- Abdominal pain → gi, genitourinary, musculoskeletal
-- Back pain → musculoskeletal, neurological, genitourinary
-
-RULES:
-- Output ONLY valid JSON.
-- Ask about ONE system at a time.
-- If the patient denies symptoms, store as ["no X", "no Y"].
-- Once 3 systems are in "ros", set reply to "Thank you — I have everything I need."
-- Do NOT ask emotional, psychological, or off-topic questions.
-
-OUTPUT FORMAT:
-{
-  "chief_complaint": "...", "onset": "...", "location": "...", "duration": "...",
-  "character": "...", "severity": "...", "aggravating": "...", "relieving": "...",
-  "ros": {"system_name": ["findings"], ...},
-  "reply": "Your single ROS question"
-}"""
+HPI_FIELDS = ["onset", "location", "duration", "character", "severity", "aggravating", "relieving"]
+ROS_REQUIRED = 3
 
 
-def get_system_prompt(stage: str) -> str:
-    """Return the appropriate system prompt for the current clinical stage."""
-    if stage == "ros":
-        return ROS_PROMPT
-    elif stage == "hpi":
-        return HPI_PROMPT
+def build_state_context(current_json: str) -> str:
+    """Build a human-readable status summary so the LLM knows exactly what's filled and missing."""
+    try:
+        state = json.loads(current_json)
+    except Exception:
+        state = {}
+
+    lines = ["FIELD STATUS:"]
+
+    # Chief complaint
+    cc = state.get("chief_complaint")
+    if cc:
+        lines.append(f'  ✅ chief_complaint: "{cc}"')
     else:
-        return INTAKE_PROMPT
+        lines.append("  ❌ chief_complaint: MISSING — ask what brings them in")
+
+    # HPI fields
+    for field in HPI_FIELDS:
+        val = state.get(field)
+        if val:
+            lines.append(f'  ✅ {field}: "{val}"')
+        else:
+            lines.append(f"  ❌ {field}: MISSING")
+
+    # ROS
+    ros = state.get("ros", {})
+    if ros:
+        for sys_name, findings in ros.items():
+            lines.append(f'  ✅ ros.{sys_name}: {findings}')
+    ros_remaining = ROS_REQUIRED - len(ros)
+    if ros_remaining > 0:
+        lines.append(f"  ❌ ros: {ros_remaining} more system(s) needed")
+    else:
+        lines.append(f"  ✅ ros: all {ROS_REQUIRED} systems collected")
+
+    # Determine current phase
+    if not cc:
+        phase = "INTAKE"
+    elif any(not state.get(f) for f in HPI_FIELDS):
+        phase = "HPI"
+        first_missing = next(f for f in HPI_FIELDS if not state.get(f))
+        lines.append(f"\nCURRENT PHASE: {phase} — ask about '{first_missing}' next")
+    elif ros_remaining > 0:
+        phase = "ROS"
+        lines.append(f"\nCURRENT PHASE: {phase} — ask about the next body system relevant to '{cc}'")
+    else:
+        phase = "DONE"
+        lines.append(f"\nCURRENT PHASE: {phase} — all data collected, set reply to completion message")
+
+    if not cc:
+        lines.append(f"\nCURRENT PHASE: {phase}")
+
+    return "\n".join(lines)
 
 
 class CombinedOutput(BaseModel):
@@ -117,7 +128,6 @@ class MockLLM:
         except Exception:
             state = {}
 
-        # Mock just steps through HPI fields in order, using the patient's last message as the value
         lines = transcript.strip().split("\n")
         last_patient_msg = ""
         for line in reversed(lines):
@@ -134,13 +144,11 @@ class MockLLM:
             state["reply"] = "What brings you in today?" if not state.get("chief_complaint") else f"When did the {state['chief_complaint']} start?"
 
         elif stage == "hpi":
-            # Fill the first empty HPI field with the patient's answer
-            for field in hpi_fields[1:]:  # skip chief_complaint, already filled
+            for field in hpi_fields[1:]:
                 if not state.get(field):
                     if last_patient_msg:
                         state[field] = last_patient_msg
                     break
-            # Ask about the next missing field
             for field in hpi_fields[1:]:
                 if not state.get(field):
                     labels = {"onset": "when it started", "location": "where you feel it",
@@ -154,14 +162,12 @@ class MockLLM:
 
         elif stage == "ros":
             ros = state.get("ros", {})
-            # Fill the first empty ROS system
             for sys_name in ros_systems:
                 if sys_name not in ros:
                     if last_patient_msg:
                         ros[sys_name] = [last_patient_msg]
                         state["ros"] = ros
                     break
-            # Ask about next missing system
             for sys_name in ros_systems:
                 if sys_name not in ros:
                     state["reply"] = f"Any {sys_name} symptoms?"
@@ -179,34 +185,38 @@ class OllamaLLM:
 
     def combined_call(self, transcript: str, current_json: str, stage: str = "intake") -> CombinedOutput:
         """
-        Calls the local Ollama instance using the /chat endpoint so system tags 
-        are properly applied.
+        Single LLM call: extracts clinical data + generates next question.
+        The unified prompt + state context gives the LLM full visibility.
         """
+        state_context = build_state_context(current_json)
+
         prompt = (
+            f"{state_context}\n\n"
             f"CURRENT CLINICAL STATE (update with any new patient info):\n{current_json}\n\n"
-            f"FULL CONVERSATION TRANSCRIPT:\n{transcript}\n\n"
-            "Instructions: Extract all new clinical facts from the transcript, merge them into the state, "
-            "and generate exactly ONE empathetic follow-up question for whatever is still missing. "
-            "Return ONLY the JSON object, no other text."
+            f"CONVERSATION TRANSCRIPT:\n{transcript}\n\n"
+            "TASK: Read the patient's latest message. Extract any new clinical facts into the JSON. "
+            "Then ask exactly ONE question about the FIRST missing item shown above. "
+            "Return ONLY the updated JSON object."
         )
 
         import time
         import requests
-        
+
         t_start = time.time()
         print(f"[Ollama] Starting inference for model '{self.model_name}'...")
-        
+        print(f"[Ollama] State context:\n{state_context}")
+
         payload = {
             "model": self.model_name,
             "messages": [
-                {"role": "system", "content": get_system_prompt(stage)},
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}
             ],
             "format": "json",
             "stream": False,
             "options": {
                 "temperature": 0.0,
-                "num_predict": 250
+                "num_predict": 400
             }
         }
         

@@ -4,7 +4,7 @@ from typing import Optional, TypedDict, Annotated
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
-from app.llm import get_llm, CombinedOutput
+from app.llm import get_llm, CombinedOutput, HPI_FIELDS, ROS_REQUIRED
 from app.schemas import ClinicalBrief, HPI, ClinicalStateExtraction
 
 _MOCK = lambda: os.environ.get("MOCK_LLM", "true").lower() == "true"
@@ -23,8 +23,7 @@ class IntakeState(TypedDict):
     frontend_stage: str          # 'intake', 'hpi', 'ros', 'done'
 
 
-HPI_FIELDS = ["onset", "location", "duration", "character", "severity", "aggravating", "relieving"]
-ROS_REQUIRED = 3
+# HPI_FIELDS and ROS_REQUIRED imported from app.llm
 
 EMERGENCY_PHRASES = [
     "crushing chest pain", "can't breathe", "cannot breathe",
