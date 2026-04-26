@@ -91,6 +91,18 @@ async def chat(request: ChatRequest):
     snapshot = graph.get_state(config)
     print(f"[{time.time():.3f}] [API] Read existing state snapshot.")
     
+    # Guard: if session is already complete, don't re-invoke the graph
+    current_stage = snapshot.values.get("frontend_stage", "intake") if snapshot and snapshot.values else "intake"
+    if current_stage == "done":
+        print(f"[{time.time():.3f}] [API] Session already complete. Returning existing brief.")
+        reply = get_last_reply(request.session_id)
+        brief_dict = get_brief(request.session_id)
+        return ChatResponse(
+            reply=reply or "Your intake is already complete. Please start a new session.",
+            state="done",
+            brief=brief_dict
+        )
+
     # Check if graph is interrupted and waiting for input
     t_start_graph = time.time()
     if snapshot.next:

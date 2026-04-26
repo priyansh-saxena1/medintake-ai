@@ -26,9 +26,15 @@ OUTPUT FORMAT (strictly follow this, no extra text):
   "severity": "how bad, e.g. mild, moderate, severe, or a number out of 10",
   "aggravating": "what makes it worse",
   "relieving": "what makes it better or go away",
-  "ros": {"system_name": ["finding1", "finding2"]},
+  "ros": {"cardiac": ["findings"], "respiratory": ["findings"], "gi": ["findings"]},
   "reply": "The single question to ask the patient next"
 }
+
+REVIEW OF SYSTEMS (ROS): Once all HPI fields above are filled, ask about these 3 systems ONE AT A TIME:
+1. Cardiac: palpitations, leg swelling, dizziness
+2. Respiratory: shortness of breath, cough, wheezing
+3. GI: nausea, vomiting, heartburn
+For each system the patient denies symptoms, store as ["no palpitations", "no leg swelling"]. Do NOT ask emotional or psychological questions — stick to the 3 systems above.
 
 Use null for any field not yet known. Keep existing values if the patient didn't add new info.
 
