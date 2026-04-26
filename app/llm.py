@@ -104,7 +104,9 @@ def build_state_context(current_json: str) -> str:
 
 
 class CombinedOutput(BaseModel):
-    _reasoning: str = Field(default="", alias="_reasoning")
+    # Named 'reasoning' (no leading underscore — Pydantic reserves those for private attrs).
+    # The LLM prompt asks it to fill "_reasoning" in JSON; we accept that via alias.
+    reasoning: str = Field(default="", alias="_reasoning")
     chief_complaint: str | None = None
     onset: str | None = None
     location: str | None = None
@@ -117,6 +119,7 @@ class CombinedOutput(BaseModel):
     emergency: bool = False
     reply: str = ""
 
+    # Allow both the alias ("_reasoning") and the field name ("reasoning") when parsing
     model_config = {"populate_by_name": True}
 
 
@@ -298,10 +301,9 @@ class OllamaLLM:
             merged_ros = {**prev.ros, **result.ros}
             object.__setattr__(result, "ros", merged_ros)
 
-            # Log the reasoning so we can debug
-            reasoning = parsed.get("_reasoning", "")
-            if reasoning:
-                print(f"[Reasoning] {reasoning[:300]}")
+            # Log the reasoning so we can debug (stored as result.reasoning via alias)
+            if result.reasoning:
+                print(f"[Reasoning] {result.reasoning[:300]}")
 
             return result
 
