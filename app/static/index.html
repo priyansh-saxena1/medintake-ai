@@ -1,11 +1,18 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Clinical Intake Agent</title>
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
 
     :root {
       --bg: #f4f6f9;
@@ -26,8 +33,8 @@
       --success-light: #f0fdf4;
       --radius: 12px;
       --radius-sm: 6px;
-      --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
-      --shadow-md: 0 4px 16px rgba(0,0,0,0.08);
+      --shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+      --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
     }
 
     body {
@@ -111,15 +118,25 @@
       transition: background 0.3s;
     }
 
-    .status-dot.active { background: var(--success); }
+    .status-dot.active {
+      background: var(--success);
+    }
+
     .status-dot.thinking {
       background: var(--accent);
       animation: pulse 1.2s infinite;
     }
 
     @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.4; }
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.4;
+      }
     }
 
     /* Main layout */
@@ -189,14 +206,20 @@
       transition: all 0.3s;
     }
 
-    .step.active .step-label { color: var(--accent); }
+    .step.active .step-label {
+      color: var(--accent);
+    }
+
     .step.active .step-num {
       border-color: var(--accent);
       background: var(--accent-light);
       color: var(--accent);
     }
 
-    .step.done .step-label { color: var(--success); }
+    .step.done .step-label {
+      color: var(--success);
+    }
+
     .step.done .step-num {
       border-color: var(--success);
       background: var(--success-light);
@@ -222,9 +245,18 @@
       scroll-behavior: smooth;
     }
 
-    .messages::-webkit-scrollbar { width: 4px; }
-    .messages::-webkit-scrollbar-track { background: transparent; }
-    .messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .messages::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .messages::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .messages::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 4px;
+    }
 
     /* Message bubbles */
     .message {
@@ -235,8 +267,15 @@
     }
 
     @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(4px); }
-      to { opacity: 1; transform: translateY(0); }
+      from {
+        opacity: 0;
+        transform: translateY(4px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
     }
 
     .message.user {
@@ -244,7 +283,9 @@
       flex-direction: row-reverse;
     }
 
-    .message.agent { align-self: flex-start; }
+    .message.agent {
+      align-self: flex-start;
+    }
 
     .avatar {
       width: 30px;
@@ -307,12 +348,27 @@
       animation: typing 1.2s infinite;
     }
 
-    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
-    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+    .typing-dot:nth-child(2) {
+      animation-delay: 0.2s;
+    }
+
+    .typing-dot:nth-child(3) {
+      animation-delay: 0.4s;
+    }
 
     @keyframes typing {
-      0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
-      30% { transform: translateY(-4px); opacity: 1; }
+
+      0%,
+      60%,
+      100% {
+        transform: translateY(0);
+        opacity: 0.5;
+      }
+
+      30% {
+        transform: translateY(-4px);
+        opacity: 1;
+      }
     }
 
     /* Input area */
@@ -354,8 +410,14 @@
       padding: 1px 0;
     }
 
-    textarea::placeholder { color: var(--text-muted); }
-    textarea:disabled { opacity: 0.5; cursor: not-allowed; }
+    textarea::placeholder {
+      color: var(--text-muted);
+    }
+
+    textarea:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
 
     .send-btn {
       width: 34px;
@@ -372,9 +434,18 @@
       transition: background 0.2s, transform 0.1s;
     }
 
-    .send-btn:hover:not(:disabled) { background: var(--accent-hover); }
-    .send-btn:active:not(:disabled) { transform: scale(0.95); }
-    .send-btn:disabled { background: var(--border); cursor: not-allowed; }
+    .send-btn:hover:not(:disabled) {
+      background: var(--accent-hover);
+    }
+
+    .send-btn:active:not(:disabled) {
+      transform: scale(0.95);
+    }
+
+    .send-btn:disabled {
+      background: var(--border);
+      cursor: not-allowed;
+    }
 
     .send-btn svg {
       width: 16px;
@@ -456,8 +527,22 @@
       transition: all 0.2s;
       flex-shrink: 0;
     }
-    .icon-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-light); }
-    .icon-btn svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+    .icon-btn:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-light);
+    }
+
+    .icon-btn svg {
+      width: 13px;
+      height: 13px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
 
     .brief-content {
       flex: 1;
@@ -468,8 +553,14 @@
       gap: 16px;
     }
 
-    .brief-content::-webkit-scrollbar { width: 4px; }
-    .brief-content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .brief-content::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .brief-content::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 4px;
+    }
 
     .brief-empty {
       display: flex;
@@ -493,9 +584,16 @@
       stroke-linejoin: round;
     }
 
-    .brief-empty p { font-size: 13px; line-height: 1.6; }
+    .brief-empty p {
+      font-size: 13px;
+      line-height: 1.6;
+    }
 
-    .brief-section { display: flex; flex-direction: column; gap: 8px; }
+    .brief-section {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
 
     .brief-section-title {
       font-size: 11px;
@@ -530,7 +628,9 @@
       border-bottom: 1px solid var(--surface-2);
     }
 
-    .hpi-row:last-child { border-bottom: none; }
+    .hpi-row:last-child {
+      border-bottom: none;
+    }
 
     .hpi-key {
       font-size: 11px;
@@ -549,7 +649,11 @@
       flex: 1;
     }
 
-    .ros-system { display: flex; flex-direction: column; gap: 4px; }
+    .ros-system {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
 
     .ros-system-name {
       font-size: 12px;
@@ -558,7 +662,11 @@
       text-transform: capitalize;
     }
 
-    .ros-findings { display: flex; flex-wrap: wrap; gap: 4px; }
+    .ros-findings {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
 
     .finding-tag {
       font-size: 11px;
@@ -610,212 +718,228 @@
     }
 
     @media (max-width: 768px) {
-      .brief-panel { display: none; }
+      .brief-panel {
+        display: none;
+      }
     }
   </style>
 </head>
+
 <body>
 
-<header>
-  <div class="header-left">
-    <div class="logo-mark">
-      <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+  <header>
+    <div class="header-left">
+      <div class="logo-mark">
+        <svg viewBox="0 0 24 24">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        </svg>
+      </div>
+      <div>
+        <div class="header-title">Clinical Intake Agent</div>
+        <div class="header-subtitle">Pre-visit patient intake system</div>
+      </div>
     </div>
-    <div>
-      <div class="header-title">Clinical Intake Agent</div>
-      <div class="header-subtitle">Pre-visit patient intake system</div>
+    <div class="status-badge">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusText">Initializing</span>
     </div>
-  </div>
-  <div class="status-badge">
-    <div class="status-dot" id="statusDot"></div>
-    <span id="statusText">Initializing</span>
-  </div>
-</header>
+  </header>
 
-<div class="main">
-  <div class="chat-panel">
-    <div class="progress-bar">
-      <div class="progress-steps">
-        <div class="step" id="step-intake">
-          <div class="step-label">
-            <div class="step-num">1</div>
-            Chief Complaint
+  <div class="main">
+    <div class="chat-panel">
+      <div class="progress-bar">
+        <div class="progress-steps">
+          <div class="step" id="step-intake">
+            <div class="step-label">
+              <div class="step-num">1</div>
+              Chief Complaint
+            </div>
           </div>
-        </div>
-        <div class="step-connector"></div>
-        <div class="step" id="step-hpi">
-          <div class="step-label">
-            <div class="step-num">2</div>
-            History
+          <div class="step-connector"></div>
+          <div class="step" id="step-hpi">
+            <div class="step-label">
+              <div class="step-num">2</div>
+              History
+            </div>
           </div>
-        </div>
-        <div class="step-connector"></div>
-        <div class="step" id="step-ros">
-          <div class="step-label">
-            <div class="step-num">3</div>
-            Systems Review
+          <div class="step-connector"></div>
+          <div class="step" id="step-ros">
+            <div class="step-label">
+              <div class="step-num">3</div>
+              Systems Review
+            </div>
           </div>
-        </div>
-        <div class="step-connector"></div>
-        <div class="step" id="step-done">
-          <div class="step-label">
-            <div class="step-num">4</div>
-            Summary
+          <div class="step-connector"></div>
+          <div class="step" id="step-done">
+            <div class="step-label">
+              <div class="step-num">4</div>
+              Summary
+            </div>
           </div>
         </div>
       </div>
+
+      <div class="messages" id="messages"></div>
+
+      <div class="input-area">
+        <div class="input-wrapper">
+          <textarea id="input" placeholder="Type your response..." rows="1" autocomplete="off"
+            spellcheck="false"></textarea>
+          <button class="send-btn" id="sendBtn" disabled>
+            <svg viewBox="0 0 24 24">
+              <line x1="22" y1="2" x2="11" y2="13" />
+              <polygon points="22 2 15 22 11 13 2 9 22 2" />
+            </svg>
+          </button>
+        </div>
+        <div class="input-hint">Press Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</div>
+      </div>
     </div>
 
-    <div class="messages" id="messages"></div>
-
-    <div class="input-area">
-      <div class="input-wrapper">
-        <textarea
-          id="input"
-          placeholder="Type your response..."
-          rows="1"
-          autocomplete="off"
-          spellcheck="false"
-        ></textarea>
-        <button class="send-btn" id="sendBtn" disabled>
-          <svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-        </button>
+    <div class="brief-panel">
+      <div class="brief-header">
+        <h2>Clinical Brief</h2>
+        <div class="brief-header-right">
+          <button class="icon-btn" id="copyBtn" title="Copy to clipboard" style="display:none">
+            <svg viewBox="0 0 24 24">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          </button>
+          <button class="icon-btn" id="printBtn" title="Print" style="display:none">
+            <svg viewBox="0 0 24 24">
+              <polyline points="6 9 6 2 18 2 18 9" />
+              <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+              <rect x="6" y="14" width="12" height="8" />
+            </svg>
+          </button>
+          <span class="brief-badge" id="briefBadge">Pending</span>
+        </div>
       </div>
-      <div class="input-hint">Press Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</div>
+      <div class="brief-content" id="briefContent">
+        <div class="brief-empty">
+          <svg viewBox="0 0 24 24">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <line x1="16" y1="13" x2="8" y2="13" />
+            <line x1="16" y1="17" x2="8" y2="17" />
+            <polyline points="10 9 9 9 8 9" />
+          </svg>
+          <p>The clinical brief will appear here once the intake is complete.</p>
+        </div>
+      </div>
+      <button class="reset-btn" id="resetBtn">Start New Session</button>
     </div>
   </div>
 
-  <div class="brief-panel">
-    <div class="brief-header">
-      <h2>Clinical Brief</h2>
-      <div class="brief-header-right">
-        <button class="icon-btn" id="copyBtn" title="Copy to clipboard" style="display:none">
-          <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-        </button>
-        <button class="icon-btn" id="printBtn" title="Print" style="display:none">
-          <svg viewBox="0 0 24 24"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
-        </button>
-        <span class="brief-badge" id="briefBadge">Pending</span>
-      </div>
-    </div>
-    <div class="brief-content" id="briefContent">
-      <div class="brief-empty">
-        <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-        <p>The clinical brief will appear here once the intake is complete.</p>
-      </div>
-    </div>
-    <button class="reset-btn" id="resetBtn">Start New Session</button>
-  </div>
-</div>
+  <script>
+    const messagesEl = document.getElementById('messages');
+    const inputEl = document.getElementById('input');
+    const sendBtn = document.getElementById('sendBtn');
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+    const briefContent = document.getElementById('briefContent');
+    const briefBadge = document.getElementById('briefBadge');
+    const resetBtn = document.getElementById('resetBtn');
 
-<script>
-  const messagesEl = document.getElementById('messages');
-  const inputEl = document.getElementById('input');
-  const sendBtn = document.getElementById('sendBtn');
-  const statusDot = document.getElementById('statusDot');
-  const statusText = document.getElementById('statusText');
-  const briefContent = document.getElementById('briefContent');
-  const briefBadge = document.getElementById('briefBadge');
-  const resetBtn = document.getElementById('resetBtn');
+    let sessionId = 'session_' + Math.random().toString(36).slice(2, 11);
+    let isWaiting = false;
+    let isComplete = false;
 
-  let sessionId = 'session_' + Math.random().toString(36).slice(2, 11);
-  let isWaiting = false;
-  let isComplete = false;
+    const STEPS = { intake: 1, hpi: 2, ros: 3, brief_generator: 4, done: 4 };
 
-  const STEPS = { intake: 1, hpi: 2, ros: 3, brief_generator: 4, done: 4 };
-
-  function setStatus(state) {
-    if (state === 'thinking') {
-      statusDot.className = 'status-dot thinking';
-      statusText.textContent = 'Processing';
-    } else if (state === 'ready') {
-      statusDot.className = 'status-dot active';
-      statusText.textContent = 'Ready';
-    } else if (state === 'complete') {
-      statusDot.className = 'status-dot active';
-      statusText.textContent = 'Intake complete';
-    } else {
-      statusDot.className = 'status-dot';
-      statusText.textContent = 'Offline';
-    }
-  }
-
-  function updateProgress(nodeState) {
-    const stepMap = { intake: 'step-intake', hpi: 'step-hpi', ros: 'step-ros', done: 'step-done', brief_generator: 'step-done' };
-    const order = ['step-intake', 'step-hpi', 'step-ros', 'step-done'];
-    const current = stepMap[nodeState] || 'step-intake';
-    const currentIdx = order.indexOf(current);
-
-    order.forEach((id, idx) => {
-      const el = document.getElementById(id);
-      el.className = 'step';
-      if (idx < currentIdx) el.classList.add('done');
-      else if (idx === currentIdx) el.classList.add('active');
-    });
-  }
-
-  function addMessage(role, text) {
-    const wrap = document.createElement('div');
-    wrap.className = `message ${role}`;
-
-    const avatar = document.createElement('div');
-    avatar.className = 'avatar';
-    avatar.textContent = role === 'agent' ? 'AI' : 'PT';
-
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    bubble.textContent = text;
-
-    wrap.appendChild(avatar);
-    wrap.appendChild(bubble);
-    messagesEl.appendChild(wrap);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-    return wrap;
-  }
-
-  function showTyping() {
-    const wrap = document.createElement('div');
-    wrap.className = 'message agent';
-    wrap.id = 'typing';
-
-    const avatar = document.createElement('div');
-    avatar.className = 'avatar';
-    avatar.textContent = 'AI';
-
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble typing-indicator';
-    for (let i = 0; i < 3; i++) {
-      const dot = document.createElement('div');
-      dot.className = 'typing-dot';
-      bubble.appendChild(dot);
+    function setStatus(state) {
+      if (state === 'thinking') {
+        statusDot.className = 'status-dot thinking';
+        statusText.textContent = 'Processing';
+      } else if (state === 'ready') {
+        statusDot.className = 'status-dot active';
+        statusText.textContent = 'Ready';
+      } else if (state === 'complete') {
+        statusDot.className = 'status-dot active';
+        statusText.textContent = 'Intake complete';
+      } else {
+        statusDot.className = 'status-dot';
+        statusText.textContent = 'Offline';
+      }
     }
 
-    wrap.appendChild(avatar);
-    wrap.appendChild(bubble);
-    messagesEl.appendChild(wrap);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-  }
+    function updateProgress(nodeState) {
+      const stepMap = { intake: 'step-intake', hpi: 'step-hpi', ros: 'step-ros', done: 'step-done', brief_generator: 'step-done' };
+      const order = ['step-intake', 'step-hpi', 'step-ros', 'step-done'];
+      const current = stepMap[nodeState] || 'step-intake';
+      const currentIdx = order.indexOf(current);
 
-  function removeTyping() {
-    const el = document.getElementById('typing');
-    if (el) el.remove();
-  }
+      order.forEach((id, idx) => {
+        const el = document.getElementById(id);
+        el.className = 'step';
+        if (idx < currentIdx) el.classList.add('done');
+        else if (idx === currentIdx) el.classList.add('active');
+      });
+    }
 
-  let lastBrief = null;
+    function addMessage(role, text) {
+      const wrap = document.createElement('div');
+      wrap.className = `message ${role}`;
 
-  function renderBrief(brief) {
-    lastBrief = brief;
-    const hpiLabels = [
-      ['onset', 'Onset'],
-      ['location', 'Location'],
-      ['duration', 'Duration'],
-      ['character', 'Character'],
-      ['severity', 'Severity'],
-      ['aggravating', 'Aggravating'],
-      ['relieving', 'Relieving'],
-    ];
+      const avatar = document.createElement('div');
+      avatar.className = 'avatar';
+      avatar.textContent = role === 'agent' ? 'AI' : 'PT';
 
-    let html = `
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.textContent = text;
+
+      wrap.appendChild(avatar);
+      wrap.appendChild(bubble);
+      messagesEl.appendChild(wrap);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return wrap;
+    }
+
+    function showTyping() {
+      const wrap = document.createElement('div');
+      wrap.className = 'message agent';
+      wrap.id = 'typing';
+
+      const avatar = document.createElement('div');
+      avatar.className = 'avatar';
+      avatar.textContent = 'AI';
+
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble typing-indicator';
+      for (let i = 0; i < 3; i++) {
+        const dot = document.createElement('div');
+        dot.className = 'typing-dot';
+        bubble.appendChild(dot);
+      }
+
+      wrap.appendChild(avatar);
+      wrap.appendChild(bubble);
+      messagesEl.appendChild(wrap);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function removeTyping() {
+      const el = document.getElementById('typing');
+      if (el) el.remove();
+    }
+
+    let lastBrief = null;
+
+    function renderBrief(brief) {
+      lastBrief = brief;
+      const hpiLabels = [
+        ['onset', 'Onset'],
+        ['location', 'Location'],
+        ['duration', 'Duration'],
+        ['character', 'Character'],
+        ['severity', 'Severity'],
+        ['aggravating', 'Aggravating'],
+        ['relieving', 'Relieving'],
+      ];
+
+      let html = `
       <div class="brief-section">
         <div class="brief-section-title">Chief Complaint</div>
         <div class="cc-value">${escHtml(brief.chief_complaint)}</div>
@@ -825,190 +949,195 @@
         <div class="hpi-grid">
     `;
 
-    for (const [key, label] of hpiLabels) {
-      const val = brief.hpi[key] || 'Not specified';
-      const isMissing = !brief.hpi[key] || brief.hpi[key] === 'Not specified';
-      html += `
+      for (const [key, label] of hpiLabels) {
+        const val = brief.hpi[key] || 'Not specified';
+        const isMissing = !brief.hpi[key] || brief.hpi[key] === 'Not specified';
+        html += `
         <div class="hpi-row">
           <div class="hpi-key">${label}</div>
           <div class="hpi-val" style="${isMissing ? 'color:var(--text-muted);font-style:italic' : ''}">${escHtml(val)}</div>
         </div>
       `;
+      }
+
+      html += `</div></div>`;
+
+      if (brief.ros && Object.keys(brief.ros).length > 0) {
+        html += `<div class="brief-section"><div class="brief-section-title">Review of Systems</div>`;
+        for (const [system, findings] of Object.entries(brief.ros)) {
+          const label = system.charAt(0).toUpperCase() + system.slice(1);
+          html += `<div class="ros-system"><div class="ros-system-name">${escHtml(label)}</div><div class="ros-findings">`;
+          findings.forEach(f => {
+            const fl = f.toLowerCase();
+            const isNeg = fl.startsWith('no ') || fl.includes('none') || fl.includes('absent') || fl.includes('denied') || fl.includes('no swelling') || fl.includes('negative');
+            html += `<span class="finding-tag ${isNeg ? 'negative' : 'positive'}">${escHtml(f)}</span>`;
+          });
+          html += `</div></div>`;
+        }
+        html += `</div>`;
+      }
+
+      const ts = brief.generated_at ? new Date(brief.generated_at).toLocaleString() : '';
+      if (ts) html += `<div class="brief-timestamp">Generated ${ts}</div>`;
+
+      briefContent.innerHTML = html;
+      briefBadge.textContent = 'Complete';
+      briefBadge.className = 'brief-badge complete';
+      document.getElementById('copyBtn').style.display = 'flex';
+      document.getElementById('printBtn').style.display = 'flex';
     }
 
-    html += `</div></div>`;
+    function briefToPlainText(brief) {
+      const hpiLabels = ['onset', 'location', 'duration', 'character', 'severity', 'aggravating', 'relieving'];
+      let txt = `CLINICAL BRIEF\n${'='.repeat(40)}\n`;
+      txt += `Chief Complaint: ${brief.chief_complaint}\n\n`;
+      txt += `History of Present Illness\n${'-'.repeat(30)}\n`;
+      for (const key of hpiLabels) {
+        const val = brief.hpi[key] || 'Not specified';
+        txt += `${key.charAt(0).toUpperCase() + key.slice(1).padEnd(14)}: ${val}\n`;
+      }
+      if (brief.ros && Object.keys(brief.ros).length > 0) {
+        txt += `\nReview of Systems\n${'-'.repeat(30)}\n`;
+        for (const [sys, findings] of Object.entries(brief.ros)) {
+          txt += `${sys.charAt(0).toUpperCase() + sys.slice(1)}: ${findings.join(', ')}\n`;
+        }
+      }
+      const ts = brief.generated_at ? new Date(brief.generated_at).toLocaleString() : '';
+      if (ts) txt += `\nGenerated: ${ts}`;
+      return txt;
+    }
 
-    if (brief.ros && Object.keys(brief.ros).length > 0) {
-      html += `<div class="brief-section"><div class="brief-section-title">Review of Systems</div>`;
-      for (const [system, findings] of Object.entries(brief.ros)) {
-        const label = system.charAt(0).toUpperCase() + system.slice(1);
-        html += `<div class="ros-system"><div class="ros-system-name">${escHtml(label)}</div><div class="ros-findings">`;
-        findings.forEach(f => {
-          const fl = f.toLowerCase();
-          const isNeg = fl.startsWith('no ') || fl.includes('none') || fl.includes('absent') || fl.includes('denied') || fl.includes('no swelling') || fl.includes('negative');
-          html += `<span class="finding-tag ${isNeg ? 'negative' : 'positive'}">${escHtml(f)}</span>`;
+    function escHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    async function sendMessage(text) {
+      if (!text.trim() || isWaiting || isComplete) return;
+
+      isWaiting = true;
+      sendBtn.disabled = true;
+      inputEl.disabled = true;
+      setStatus('thinking');
+
+      addMessage('user', text);
+      showTyping();
+
+      try {
+        const res = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: sessionId, message: text })
         });
-        html += `</div></div>`;
-      }
-      html += `</div>`;
-    }
 
-    const ts = brief.generated_at ? new Date(brief.generated_at).toLocaleString() : '';
-    if (ts) html += `<div class="brief-timestamp">Generated ${ts}</div>`;
+        if (!res.ok) throw new Error(`Server error ${res.status}`);
+        const data = await res.json();
 
-    briefContent.innerHTML = html;
-    briefBadge.textContent = 'Complete';
-    briefBadge.className = 'brief-badge complete';
-    document.getElementById('copyBtn').style.display = 'flex';
-    document.getElementById('printBtn').style.display = 'flex';
-  }
+        removeTyping();
+        addMessage('agent', data.reply);
+        updateProgress(data.state);
 
-  function briefToPlainText(brief) {
-    const hpiLabels = ['onset','location','duration','character','severity','aggravating','relieving'];
-    let txt = `CLINICAL BRIEF\n${'='.repeat(40)}\n`;
-    txt += `Chief Complaint: ${brief.chief_complaint}\n\n`;
-    txt += `History of Present Illness\n${'-'.repeat(30)}\n`;
-    for (const key of hpiLabels) {
-      const val = brief.hpi[key] || 'Not specified';
-      txt += `${key.charAt(0).toUpperCase()+key.slice(1).padEnd(14)}: ${val}\n`;
-    }
-    if (brief.ros && Object.keys(brief.ros).length > 0) {
-      txt += `\nReview of Systems\n${'-'.repeat(30)}\n`;
-      for (const [sys, findings] of Object.entries(brief.ros)) {
-        txt += `${sys.charAt(0).toUpperCase()+sys.slice(1)}: ${findings.join(', ')}\n`;
-      }
-    }
-    const ts = brief.generated_at ? new Date(brief.generated_at).toLocaleString() : '';
-    if (ts) txt += `\nGenerated: ${ts}`;
-    return txt;
-  }
+        if (data.state === 'done' && data.brief) {
+          renderBrief(data.brief);
+          isComplete = true;
+          setStatus('complete');
+          inputEl.disabled = true;
+          sendBtn.disabled = true;
+          inputEl.placeholder = 'Intake complete. Start a new session to begin again.';
+        } else {
+          setStatus('ready');
+          inputEl.disabled = false;
+          inputEl.focus();
+          sendBtn.disabled = false;
+        }
 
-  function escHtml(str) {
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-  }
-
-  async function sendMessage(text) {
-    if (!text.trim() || isWaiting || isComplete) return;
-
-    isWaiting = true;
-    sendBtn.disabled = true;
-    inputEl.disabled = true;
-    setStatus('thinking');
-
-    addMessage('user', text);
-    showTyping();
-
-    try {
-      const res = await fetch('/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, message: text })
-      });
-
-      if (!res.ok) throw new Error(`Server error ${res.status}`);
-      const data = await res.json();
-
-      removeTyping();
-      addMessage('agent', data.reply);
-      updateProgress(data.state);
-
-      if (data.state === 'done' && data.brief) {
-        renderBrief(data.brief);
-        isComplete = true;
-        setStatus('complete');
-        inputEl.disabled = true;
-        sendBtn.disabled = true;
-        inputEl.placeholder = 'Intake complete. Start a new session to begin again.';
-      } else {
+      } catch (err) {
+        console.error('[Chat Error]', err.name, err.message);
+        removeTyping();
+        const isNetwork = err.name === 'TypeError' || err.message.includes('fetch') || err.message.includes('Failed');
+        const errorMsg = isNetwork
+          ? 'Network error — the tunnel may have dropped. Refresh and try again.'
+          : `Error: ${err.message}`;
+        addMessage('agent', errorMsg);
         setStatus('ready');
         inputEl.disabled = false;
-        inputEl.focus();
         sendBtn.disabled = false;
       }
 
-    } catch (err) {
-      removeTyping();
-      addMessage('agent', 'An error occurred. Please try again.');
-      setStatus('ready');
-      inputEl.disabled = false;
-      sendBtn.disabled = false;
+      isWaiting = false;
     }
 
-    isWaiting = false;
-  }
+    async function initSession() {
+      setStatus('thinking');
+      showTyping();
 
-  async function initSession() {
-    setStatus('thinking');
-    showTyping();
+      try {
+        const res = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: sessionId, message: 'hello' })
+        });
 
-    try {
-      const res = await fetch('/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, message: 'hello' })
+        const data = await res.json();
+        removeTyping();
+        addMessage('agent', data.reply);
+        updateProgress(data.state);
+        setStatus('ready');
+        sendBtn.disabled = false;
+        inputEl.focus();
+      } catch {
+        removeTyping();
+        addMessage('agent', 'Could not connect to the server. Please refresh.');
+        setStatus('offline');
+      }
+    }
+
+    document.getElementById('copyBtn').addEventListener('click', () => {
+      if (!lastBrief) return;
+      const txt = briefToPlainText(lastBrief);
+      navigator.clipboard.writeText(txt).then(() => {
+        const btn = document.getElementById('copyBtn');
+        btn.title = 'Copied!';
+        setTimeout(() => { btn.title = 'Copy to clipboard'; }, 2000);
       });
-
-      const data = await res.json();
-      removeTyping();
-      addMessage('agent', data.reply);
-      updateProgress(data.state);
-      setStatus('ready');
-      sendBtn.disabled = false;
-      inputEl.focus();
-    } catch {
-      removeTyping();
-      addMessage('agent', 'Could not connect to the server. Please refresh.');
-      setStatus('offline');
-    }
-  }
-
-  document.getElementById('copyBtn').addEventListener('click', () => {
-    if (!lastBrief) return;
-    const txt = briefToPlainText(lastBrief);
-    navigator.clipboard.writeText(txt).then(() => {
-      const btn = document.getElementById('copyBtn');
-      btn.title = 'Copied!';
-      setTimeout(() => { btn.title = 'Copy to clipboard'; }, 2000);
     });
-  });
 
-  document.getElementById('printBtn').addEventListener('click', () => {
-    if (!lastBrief) return;
-    const txt = briefToPlainText(lastBrief);
-    const w = window.open('', '_blank');
-    w.document.write(`<pre style="font-family:monospace;padding:24px;max-width:700px;margin:auto">${txt}</pre>`);
-    w.document.close();
-    w.print();
-  });
+    document.getElementById('printBtn').addEventListener('click', () => {
+      if (!lastBrief) return;
+      const txt = briefToPlainText(lastBrief);
+      const w = window.open('', '_blank');
+      w.document.write(`<pre style="font-family:monospace;padding:24px;max-width:700px;margin:auto">${txt}</pre>`);
+      w.document.close();
+      w.print();
+    });
 
-  sendBtn.addEventListener('click', () => {
-    const text = inputEl.value.trim();
-    if (text) { inputEl.value = ''; autoResize(); sendMessage(text); }
-  });
-
-  inputEl.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
+    sendBtn.addEventListener('click', () => {
       const text = inputEl.value.trim();
       if (text) { inputEl.value = ''; autoResize(); sendMessage(text); }
+    });
+
+    inputEl.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        const text = inputEl.value.trim();
+        if (text) { inputEl.value = ''; autoResize(); sendMessage(text); }
+      }
+    });
+
+    inputEl.addEventListener('input', autoResize);
+
+    function autoResize() {
+      inputEl.style.height = 'auto';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
     }
-  });
 
-  inputEl.addEventListener('input', autoResize);
-
-  function autoResize() {
-    inputEl.style.height = 'auto';
-    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
-  }
-
-  resetBtn.addEventListener('click', () => {
-    sessionId = 'session_' + Math.random().toString(36).slice(2, 11);
-    messagesEl.innerHTML = '';
-    briefContent.innerHTML = `
+    resetBtn.addEventListener('click', () => {
+      sessionId = 'session_' + Math.random().toString(36).slice(2, 11);
+      messagesEl.innerHTML = '';
+      briefContent.innerHTML = `
       <div class="brief-empty">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -1019,19 +1148,20 @@
         </svg>
         <p>The clinical brief will appear here once the intake is complete.</p>
       </div>`;
-    briefBadge.textContent = 'Pending';
-    briefBadge.className = 'brief-badge';
-    inputEl.value = '';
-    inputEl.placeholder = 'Type your response...';
-    inputEl.disabled = false;
-    isComplete = false;
-    isWaiting = false;
+      briefBadge.textContent = 'Pending';
+      briefBadge.className = 'brief-badge';
+      inputEl.value = '';
+      inputEl.placeholder = 'Type your response...';
+      inputEl.disabled = false;
+      isComplete = false;
+      isWaiting = false;
+      updateProgress('intake');
+      initSession();
+    });
+
     updateProgress('intake');
     initSession();
-  });
-
-  updateProgress('intake');
-  initSession();
-</script>
+  </script>
 </body>
+
 </html>

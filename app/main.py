@@ -1,6 +1,8 @@
 import argparse
 import json
 import os
+import time
+import traceback
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -10,7 +12,7 @@ from app.schemas import ClinicalBrief
 from langgraph.types import Command
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-import os
+
 
 class ChatRequest(BaseModel):
     session_id: str
@@ -82,51 +84,62 @@ async def health():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    import time
     t0 = time.time()
     print(f"\n[{t0:.3f}] [API] -> POST /chat received for {request.session_id}")
+    print(f"[{t0:.3f}] [API]    Message: '{request.message[:80]}'")
     config = {"configurable": {"thread_id": request.session_id}}
-    
-    # Get current checkpoint state
-    snapshot = graph.get_state(config)
-    print(f"[{time.time():.3f}] [API] Read existing state snapshot.")
-    
-    # Guard: if session is already complete, don't re-invoke the graph
-    current_stage = snapshot.values.get("frontend_stage", "intake") if snapshot and snapshot.values else "intake"
-    if current_stage == "done":
-        print(f"[{time.time():.3f}] [API] Session already complete. Returning existing brief.")
+
+    try:
+        # Get current checkpoint state
+        snapshot = graph.get_state(config)
+        has_state = bool(snapshot and snapshot.values)
+        has_next = bool(snapshot.next) if snapshot else False
+        print(f"[{time.time():.3f}] [API] Snapshot: has_state={has_state}, has_next={has_next}, next={snapshot.next if snapshot else 'N/A'}")
+
+        # Guard: if session is already complete, don't re-invoke the graph
+        current_stage = snapshot.values.get("frontend_stage", "intake") if has_state else "intake"
+        print(f"[{time.time():.3f}] [API] Current stage: {current_stage}")
+
+        if current_stage == "done":
+            print(f"[{time.time():.3f}] [API] Session already complete. Returning existing brief.")
+            reply = get_last_reply(request.session_id)
+            brief_dict = get_brief(request.session_id)
+            return ChatResponse(
+                reply=reply or "Your intake is already complete. Please start a new session.",
+                state="done",
+                brief=brief_dict
+            )
+
+        # Check if graph is interrupted and waiting for input
+        t_start_graph = time.time()
+        if has_next:
+            print(f"[{time.time():.3f}] [API] Resuming graph from interrupt (next={snapshot.next})...")
+            graph.update_state(config, {"messages": [{"role": "user", "content": request.message}]})
+            result = graph.invoke(None, config=config)
+        else:
+            print(f"[{time.time():.3f}] [API] Starting new graph invoke...")
+            input_state = {"messages": [{"role": "user", "content": request.message}]}
+            result = graph.invoke(input_state, config=config)
+        print(f"[{time.time():.3f}] [API] <- Graph invoke returned in {time.time() - t_start_graph:.2f}s")
+
+        current_node = get_current_node(request.session_id)
         reply = get_last_reply(request.session_id)
         brief_dict = get_brief(request.session_id)
-        return ChatResponse(
-            reply=reply or "Your intake is already complete. Please start a new session.",
-            state="done",
-            brief=brief_dict
-        )
 
-    # Check if graph is interrupted and waiting for input
-    t_start_graph = time.time()
-    if snapshot.next:
-        print(f"[{time.time():.3f}] [API] Resuming graph from interrupt...")
-        # First update state with the user message
-        graph.update_state(config, {"messages": [{"role": "user", "content": request.message}]})
-        # Then resume execution
-        result = graph.invoke(None, config=config)
-    else:
-        print(f"[{time.time():.3f}] [API] Starting new graph invoke...")
-        # New conversation - start fresh
-        input_state = {"messages": [{"role": "user", "content": request.message}]}
-        result = graph.invoke(input_state, config=config)
-    print(f"[{time.time():.3f}] [API] <- Graph invoke returned in {time.time() - t_start_graph:.2f}s")
-    
-    t_final = time.time()
-    current_node = get_current_node(request.session_id)
-    reply = get_last_reply(request.session_id)
-    brief_dict = get_brief(request.session_id)
-    
-    total_t = time.time() - t0
-    print(f"[{time.time():.3f}] [API] Chat completed in {total_t:.2f}s total. Reply length: {len(reply)}")
-    
-    return ChatResponse(reply=reply, state=current_node, brief=brief_dict)
+        total_t = time.time() - t0
+        print(f"[{time.time():.3f}] [API] Chat completed in {total_t:.2f}s. Reply='{reply[:60]}' Stage={current_node}")
+
+        return ChatResponse(reply=reply, state=current_node, brief=brief_dict)
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[{time.time():.3f}] [API] *** EXCEPTION in /chat ***")
+        print(tb)
+        return ChatResponse(
+            reply=f"Server error: {type(e).__name__}: {str(e)[:200]}",
+            state="intake",
+            brief=None
+        )
 
 
 def run_cli():
