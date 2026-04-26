@@ -158,7 +158,7 @@ def agent_node(state: IntakeState) -> dict:
             patient_answer = patient_answer or "denied"
 
             # Find which ROS system the LLM was asking about (from its repeated reply)
-            ros = dict(result.ros) if result.ros else {}
+            ros = dict(prev_ros)
             ros_label = f"patient_reported_{len(ros) + 1}"
             ros[ros_label] = [patient_answer]
             object.__setattr__(result, "ros", ros)

@@ -2,7 +2,6 @@ import os
 import json
 from pydantic import BaseModel
 
-# ── Single unified system prompt — LLM sees the full workflow ──
 SYSTEM_PROMPT = """You are a clinical intake assistant conducting a pre-visit patient interview.
 
 YOUR WORKFLOW (follow this order):
@@ -60,14 +59,12 @@ def build_state_context(current_json: str) -> str:
 
     lines = ["FIELD STATUS:"]
 
-    # Chief complaint
     cc = state.get("chief_complaint")
     if cc:
         lines.append(f'  ✅ chief_complaint: "{cc}"')
     else:
         lines.append("  ❌ chief_complaint: MISSING — ask what brings them in")
 
-    # HPI fields
     for field in HPI_FIELDS:
         val = state.get(field)
         if val:
@@ -75,7 +72,6 @@ def build_state_context(current_json: str) -> str:
         else:
             lines.append(f"  ❌ {field}: MISSING")
 
-    # ROS
     ros = state.get("ros", {})
     if ros:
         for sys_name, findings in ros.items():
@@ -86,7 +82,6 @@ def build_state_context(current_json: str) -> str:
     else:
         lines.append(f"  ✅ ros: all {ROS_REQUIRED} systems collected")
 
-    # Determine current phase
     if not cc:
         phase = "INTAKE"
     elif any(not state.get(f) for f in HPI_FIELDS):
@@ -95,6 +90,10 @@ def build_state_context(current_json: str) -> str:
         lines.append(f"\nCURRENT PHASE: {phase} — ask about '{first_missing}' next")
     elif ros_remaining > 0:
         phase = "ROS"
+        # FIX 3: explicitly list already-covered systems so the LLM never re-asks them
+        if ros:
+            already = ", ".join(ros.keys())
+            lines.append(f"  ℹ️ Already covered: {already} — DO NOT ask about these again, choose a DIFFERENT system")
         lines.append(f"\nCURRENT PHASE: {phase} — ask about the next body system relevant to '{cc}'")
     else:
         phase = "DONE"
@@ -219,7 +218,7 @@ class OllamaLLM:
                 "num_predict": 400
             }
         }
-        
+
         try:
             response = requests.post(self.api_url, json=payload, timeout=60)
             response.raise_for_status()
@@ -246,13 +245,33 @@ class OllamaLLM:
 
         try:
             parsed = json.loads(json_str)
-            # Coerce empty strings and literal "null" back to None
+
+            # FIX 1a: coerce list → comma-string AND empty/"null" → None
             for field in ["chief_complaint", "onset", "location", "duration",
                           "character", "severity", "aggravating", "relieving"]:
                 v = parsed.get(field)
-                if v is not None and str(v).strip() in ("", "null"):
+                if isinstance(v, list):
+                    parsed[field] = ", ".join(str(x) for x in v) if v else None
+                elif v is not None and str(v).strip() in ("", "null"):
                     parsed[field] = None
-            return CombinedOutput.model_validate(parsed)
+
+            result = CombinedOutput.model_validate(parsed)
+
+            # FIX 1b: prevent small models from silently dropping already-filled fields
+            try:
+                prev = CombinedOutput.model_validate_json(current_json)
+                for f in ["chief_complaint", "onset", "location", "duration",
+                          "character", "severity", "aggravating", "relieving"]:
+                    if getattr(result, f) is None and getattr(prev, f) is not None:
+                        object.__setattr__(result, f, getattr(prev, f))
+                # ROS only ever grows — merge prev so no system is lost
+                merged_ros = {**prev.ros, **result.ros}
+                object.__setattr__(result, "ros", merged_ros)
+            except Exception:
+                pass
+
+            return result
+
         except Exception as e:
             print(f"[Ollama] JSON parse error: {e}\nRaw output: {raw[:300]}")
             try:
