@@ -2,54 +2,58 @@ import os
 import json
 from pydantic import BaseModel, Field
 
-# ── Reasoning is required FIRST so the model "thinks" before filling fields ──
-SYSTEM_PROMPT = """You are a clinical intake assistant conducting a pre-visit patient interview.
+# ── Call 1: extraction only ───────────────────────────────────────────────────
+EXTRACT_SYSTEM_PROMPT = """You are a clinical data extractor.
+Extract ONLY the medical facts explicitly stated in the patient's message.
 
-STEP 1 — REASON (fill "_reasoning" first):
-  a. Quote the patient's LATEST message verbatim.
-  b. State every clinical fact it contains (onset, location, severity, etc.).
-  c. List which JSON fields are still missing after applying those facts.
-  d. Choose ONE question for the first missing field.
-
-STEP 2 — OUTPUT the JSON below (no extra text):
-
+Return ONLY a JSON object. Omit any key not mentioned by the patient:
 {
-  "_reasoning": "... your step-by-step analysis ...",
-  "chief_complaint": "..." or null,
-  "onset": "..." or null,
-  "location": "..." or null,
-  "duration": "..." or null,
-  "character": "..." or null,
-  "severity": "..." or null,
-  "aggravating": "..." or null,
-  "relieving": "..." or null,
-  "ros": {"system_name": ["finding1", "finding2"], ...},
-  "emergency": false,
-  "reply": "Your single question"
+  "chief_complaint": "...",
+  "onset": "...",
+  "location": "...",
+  "duration": "...",
+  "character": "...",
+  "severity": "...",
+  "aggravating": "...",
+  "relieving": "...",
+  "ros": {"system_name": ["finding phrase"]}
 }
 
-WORKFLOW ORDER:
-1. INTAKE — ask chief complaint (what brings them in).
-2. HPI — collect onset → location → duration → character → severity → aggravating → relieving ONE AT A TIME.
-3. ROS — screen 3 body systems RELEVANT to the chief complaint (e.g. leg pain → musculoskeletal, neurological, vascular).
-4. DONE — when all HPI fields AND 3 ROS systems are filled, set reply to:
-   "Your clinical summary is ready. Please wait for the doctor."
+EXTRACTION RULES:
+- Extract from THIS MESSAGE ONLY. Never infer from prior context.
+- Preserve full detail. "moderate around 6" → severity "moderate, 6/10".
+  "sharp pain around the knee" → character "sharp pain around the knee".
+- Severity: always include the numeric value if stated. Format: "X/10" or "moderate, 6/10".
+- aggravating vs relieving: classify by semantics, NOT by which field was asked next.
+  If patient says something WORSENS the pain → aggravating.
+  If patient says something IMPROVES it → relieving.
+  Example: "yes even on elevating it worsens" → aggravating: "worsens on elevation", relieving stays absent.
+- ROS findings: use descriptive phrases only. "slight numbness" → ok. "no tingling" → ok.
+  NEVER store bare "yes", "no", "yes i am", "sure", or similar non-descriptive answers.
+  Map findings to the correct body system (musculoskeletal, neurological, vascular, cardiac, respiratory, gi, etc.).
+  If the patient denies a symptom (e.g. "no swelling"), store it as a negative finding under the correct system.
+- If the message is a greeting or contains no medical facts, return {}.
+- Output ONLY valid JSON. No explanation, no markdown fences."""
 
-CRITICAL RULES:
-- NEVER re-ask a field already marked ✅ in the status block.
-- Ask ONE question per turn about the FIRST missing item.
-- Store "none"/"no"/"denied" answers — do NOT leave them null.
-- For ROS findings use a descriptive phrase: "no swelling", "tingling in left calf", not bare "yes"/"no".
-- Do NOT ask emotional/psychological questions.
-- Output ONLY valid JSON."""
+# ── Call 2: reply only ────────────────────────────────────────────────────────
+REPLY_SYSTEM_PROMPT = """You are a clinical intake assistant generating the next interview question.
+Given the current data-collection state, generate exactly ONE focused clinical question.
 
-HPI_FIELDS = ["onset", "location", "duration", "character", "severity", "aggravating", "relieving"]
-ROS_REQUIRED = 3
+RULES:
+- Ask about ONLY the field marked as NEXT in the state context.
+- NEVER re-ask a field already marked ✅.
+- Be natural and conversational, not robotic.
+- For ROS: ask about one specific body system by name relevant to the chief complaint.
+  If a system is already marked ✅, pick a DIFFERENT one.
+- Output ONLY valid JSON: {"reply": "your single question here"}"""
 
 BRIEF_SYSTEM_PROMPT = """You are a clinical documentation assistant.
 Given structured intake data, write a concise, professional clinical brief in plain text.
 Use standard clinical language. Do NOT invent findings not present in the data.
 Output ONLY a JSON object with one key "narrative" whose value is the formatted brief string."""
+
+HPI_FIELDS = ["onset", "location", "duration", "character", "severity", "aggravating", "relieving"]
+ROS_REQUIRED = 3
 
 
 def build_state_context(current_json: str) -> str:
@@ -86,16 +90,19 @@ def build_state_context(current_json: str) -> str:
     if not cc:
         phase = "INTAKE"
         lines.append(f"\nCURRENT PHASE: {phase}")
+        lines.append("NEXT: ask what brings the patient in today")
     elif any(not state.get(f) for f in HPI_FIELDS):
         phase = "HPI"
         first_missing = next(f for f in HPI_FIELDS if not state.get(f))
-        lines.append(f"\nCURRENT PHASE: {phase} — ask about '{first_missing}' next")
+        lines.append(f"\nCURRENT PHASE: {phase}")
+        lines.append(f"NEXT: ask about '{first_missing}' — do not ask about any other field")
     elif ros_remaining > 0:
         phase = "ROS"
         if ros:
             already = ", ".join(ros.keys())
             lines.append(f"  ℹ️ Already covered: {already} — DO NOT ask about these again")
-        lines.append(f"\nCURRENT PHASE: {phase} — ask about the next body system relevant to '{cc}'")
+        lines.append(f"\nCURRENT PHASE: {phase}")
+        lines.append(f"NEXT: ask about ONE new body system relevant to '{cc}' (not already covered above)")
     else:
         phase = "DONE"
         lines.append(f"\nCURRENT PHASE: {phase} — all data collected")
@@ -209,7 +216,7 @@ class OllamaLLM:
         self.model_name = os.environ.get("MODEL_NAME", "qwen2.5:0.5b")
         self.api_url = "http://localhost:11434/api/chat"
 
-    def _call_ollama(self, system: str, user: str, temperature: float = 0.0, num_predict: int = 600) -> str:
+    def _call_ollama(self, system: str, user: str, temperature: float = 0.0, num_predict: int = 300) -> str:
         """Single helper that calls Ollama and returns raw content string."""
         import requests, time
         payload = {
@@ -241,12 +248,129 @@ class OllamaLLM:
             s = s[start:end]
         return json.loads(s)
 
+    def _extract(self, latest_patient_msg: str, current_json: str) -> dict:
+        """
+        Call 1: Extract ONLY the facts from the latest patient message.
+        Returns a dict of changed fields (may be empty if no clinical facts).
+        ~2-3s, temperature 0.
+        """
+        try:
+            state = json.loads(current_json)
+        except Exception:
+            state = {}
+
+        cc = state.get("chief_complaint", "unknown")
+        stage_hint = ""
+        if not state.get("chief_complaint"):
+            stage_hint = "Stage: INTAKE. The patient's message likely contains their chief complaint."
+        elif any(not state.get(f) for f in HPI_FIELDS):
+            first_missing = next(f for f in HPI_FIELDS if not state.get(f))
+            stage_hint = f"Stage: HPI. We are collecting '{first_missing}' next, but extract ALL facts present."
+        else:
+            stage_hint = f"Stage: ROS. Chief complaint is '{cc}'. Classify findings by body system."
+
+        prompt = (
+            f"{stage_hint}\n\n"
+            f"Patient's message:\n\"{latest_patient_msg}\"\n\n"
+            "Extract all medical facts from this message and return JSON."
+        )
+
+        print(f"[Extract] Latest message: '{latest_patient_msg}'")
+        try:
+            raw = self._call_ollama(EXTRACT_SYSTEM_PROMPT, prompt, temperature=0.0, num_predict=300)
+            parsed = self._parse_json(raw)
+            print(f"[Extract] Result: {json.dumps(parsed)[:200]}")
+            return parsed
+        except Exception as e:
+            print(f"[Extract] Failed: {e}")
+            return {}
+
+    def _coerce_and_merge(self, extracted: dict, prev: "CombinedOutput") -> "CombinedOutput":
+        """
+        Merge extracted fields onto prev state.
+        - Coerce list values to comma-strings.
+        - Never overwrite a previously filled HPI field with None.
+        - ROS only ever grows (but validate findings are descriptive).
+        - Reclassify relieving→aggravating if the value semantically worsens pain.
+        """
+        merged = json.loads(prev.model_dump_json(by_alias=False))
+
+        _WORSEN_SIGNALS = {"worse", "worsens", "worsened", "worsen", "aggravates", "increases", "worsening"}
+
+        for field in ["chief_complaint"] + HPI_FIELDS:
+            val = extracted.get(field)
+            if val is None:
+                continue  # no new data for this field — keep prev
+            if isinstance(val, list):
+                val = ", ".join(str(x) for x in val) if val else None
+            if val is not None and str(val).strip() in ("", "null"):
+                val = None
+            if val is None:
+                continue
+
+            # Semantic reclassification: if relieving value semantically worsens, move to aggravating
+            if field == "relieving":
+                val_lower = val.lower()
+                if any(w in val_lower for w in _WORSEN_SIGNALS):
+                    print(f"[Merge] Reclassifying relieving→aggravating: '{val}'")
+                    if not merged.get("aggravating"):
+                        merged["aggravating"] = val
+                    continue  # do NOT store in relieving
+
+            # Only fill if currently empty (never overwrite a good prev value with new extraction)
+            if not merged.get(field):
+                merged[field] = val
+
+        # Merge ROS — only accept descriptive findings
+        _BARE_NOANSWER = frozenset({
+            "yes", "no", "yes i am", "yes i do", "no i don't", "sure",
+            "okay", "ok", "nope", "yep", "uh", "hmm", "y", "n"
+        })
+        new_ros = extracted.get("ros", {})
+        if isinstance(new_ros, dict):
+            merged_ros = dict(prev.ros)
+            for sys_name, findings in new_ros.items():
+                if not isinstance(findings, list):
+                    continue
+                valid = [f for f in findings
+                         if isinstance(f, str) and f.strip().lower() not in _BARE_NOANSWER and len(f.split()) > 1]
+                if valid:
+                    merged_ros[sys_name] = valid
+            merged["ros"] = merged_ros
+
+        return CombinedOutput.model_validate(merged)
+
+    def _generate_reply(self, state_context: str) -> str:
+        """
+        Call 2: Generate the next question based on the updated state.
+        ~1-2s, temperature 0.
+        """
+        prompt = (
+            f"{state_context}\n\n"
+            "Generate ONE question for the field/phase marked NEXT above."
+        )
+        try:
+            raw = self._call_ollama(REPLY_SYSTEM_PROMPT, prompt, temperature=0.0, num_predict=120)
+            parsed = self._parse_json(raw)
+            reply = parsed.get("reply", "").strip()
+            print(f"[Reply] Generated: '{reply}'")
+            return reply
+        except Exception as e:
+            print(f"[Reply] Failed: {e}")
+            return ""
+
     def combined_call(self, transcript: str, current_json: str, stage: str = "intake") -> CombinedOutput:
+        """
+        Two-call architecture:
+          Call 1 → extract facts from latest patient message (temperature 0, ~2-3s)
+          Call 2 → generate next question from updated state (temperature 0, ~1-2s)
+
+        This eliminates the one-turn-behind lag and the HPI ordering violation,
+        because extraction and reply are now strictly sequenced.
+        """
         import time
 
-        state_context = build_state_context(current_json)
-
-        # ── FIX 1: Explicitly surface the latest patient message ──────────────
+        # Pull out the latest patient message for Call 1
         lines = transcript.strip().split("\n")
         latest_patient_msg = ""
         for line in reversed(lines):
@@ -254,72 +378,40 @@ class OllamaLLM:
                 latest_patient_msg = line.replace("Patient:", "").strip()
                 break
 
-        prompt = (
-            f"PATIENT'S LATEST MESSAGE (extract facts from THIS message):\n"
-            f"  \"{latest_patient_msg}\"\n\n"
-            f"{state_context}\n\n"
-            f"FULL CONVERSATION (for context only — extract facts from latest message above):\n"
-            f"{transcript}\n\n"
-            f"CURRENT CLINICAL STATE:\n{current_json}\n\n"
-            "TASK:\n"
-            "1. Fill '_reasoning': quote the latest message, list every fact it contains, "
-            "   identify still-missing fields, choose ONE question.\n"
-            "2. Update ALL fields with new facts from the latest message.\n"
-            "3. Set 'reply' to ONE question about the FIRST missing field.\n"
-            "Return ONLY valid JSON."
-        )
-
-        print(f"[Ollama] Starting inference for model '{self.model_name}' (stage={stage})...")
-        print(f"[Ollama] State context:\n{state_context}")
-        print(f"[Ollama] Latest patient message: '{latest_patient_msg}'")
-
         try:
-            raw = self._call_ollama(SYSTEM_PROMPT, prompt, temperature=0.0, num_predict=600)
-        except Exception as e:
-            print(f"[Ollama] ERROR: {e}")
-            return CombinedOutput.model_validate_json(current_json)
-
-        try:
-            parsed = self._parse_json(raw)
-
-            # Coerce list → comma-string, empty/"null" → None
-            for field in ["chief_complaint"] + HPI_FIELDS:
-                v = parsed.get(field)
-                if isinstance(v, list):
-                    parsed[field] = ", ".join(str(x) for x in v) if v else None
-                elif v is not None and str(v).strip() in ("", "null"):
-                    parsed[field] = None
-
-            result = CombinedOutput.model_validate(parsed)
-
-            # ── FIX 2: Preserve already-filled fields (prevent model amnesia) ──
             prev = CombinedOutput.model_validate_json(current_json)
-            for f in ["chief_complaint"] + HPI_FIELDS:
-                if getattr(result, f) is None and getattr(prev, f) is not None:
-                    object.__setattr__(result, f, getattr(prev, f))
-            # ROS only ever grows
-            merged_ros = {**prev.ros, **result.ros}
-            object.__setattr__(result, "ros", merged_ros)
+        except Exception:
+            prev = CombinedOutput()
 
-            # Log the reasoning so we can debug (stored as result.reasoning via alias)
-            if result.reasoning:
-                print(f"[Reasoning] {result.reasoning[:300]}")
+        print(f"[OllamaLLM] Stage={stage} | Latest: '{latest_patient_msg}'")
 
-            return result
+        # ── Call 1: Extract ──────────────────────────────────────────────────
+        t0 = time.time()
+        extracted = self._extract(latest_patient_msg, current_json)
+        print(f"[OllamaLLM] Extract call: {time.time() - t0:.2f}s")
 
-        except Exception as e:
-            print(f"[Ollama] JSON parse error: {e}\nRaw: {raw[:300]}")
-            try:
-                base = CombinedOutput.model_validate_json(current_json)
-                object.__setattr__(base, "reply", "Could you please repeat that?")
-                return base
-            except Exception:
-                return CombinedOutput(reply="Could you please repeat that?")
+        # Merge extracted facts onto previous state
+        result = self._coerce_and_merge(extracted, prev)
+
+        # ── Call 2: Reply ────────────────────────────────────────────────────
+        updated_json = result.model_dump_json()
+        state_context = build_state_context(updated_json)
+        print(f"[OllamaLLM] State after extraction:\n{state_context}")
+
+        t1 = time.time()
+        reply = self._generate_reply(state_context)
+        print(f"[OllamaLLM] Reply call: {time.time() - t1:.2f}s")
+
+        if not reply:
+            # Fallback: use the hardcoded next-question map
+            reply = _fallback_reply(result)
+
+        object.__setattr__(result, "reply", reply)
+        return result
 
     def generate_brief_narrative(self, brief_data: dict) -> str:
         """
-        FIX 3: Second LLM call that generates a proper clinical narrative
-        instead of copy-pasting patient words verbatim.
+        Third LLM call that generates a proper clinical narrative.
         """
         cc = brief_data.get("chief_complaint", "unspecified")
         hpi = brief_data.get("hpi", {})
@@ -329,7 +421,7 @@ class OllamaLLM:
             f"Chief complaint: {cc}\n"
             f"HPI — Onset: {hpi.get('onset')}, Location: {hpi.get('location')}, "
             f"Duration: {hpi.get('duration')}, Character: {hpi.get('character')}, "
-            f"Severity: {hpi.get('severity')}/10, "
+            f"Severity: {hpi.get('severity')}, "
             f"Aggravating: {hpi.get('aggravating')}, Relieving: {hpi.get('relieving')}\n"
             f"ROS: {json.dumps(ros)}\n\n"
             "Write a concise clinical narrative (3-5 sentences, present tense, third person singular). "
@@ -343,17 +435,40 @@ class OllamaLLM:
             return parsed.get("narrative", "")
         except Exception as e:
             print(f"[Ollama] Brief narrative generation failed: {e}")
-            # Graceful fallback — structured plain-text summary
             parts = [f"Patient presents with {cc}."]
             if hpi.get("onset"):
                 parts.append(f"Symptoms began {hpi['onset']}.")
             if hpi.get("location"):
                 parts.append(f"Located at: {hpi['location']}.")
             if hpi.get("character") and hpi.get("severity"):
-                parts.append(f"Described as {hpi['character']}, severity {hpi['severity']}/10.")
+                parts.append(f"Described as {hpi['character']}, severity {hpi['severity']}.")
             if hpi.get("aggravating"):
                 parts.append(f"Aggravated by {hpi['aggravating']}; relieved by {hpi.get('relieving', 'unspecified')}.")
             return " ".join(parts)
+
+
+# ── Fallback reply map (used if Call 2 fails) ─────────────────────────────────
+
+_HPI_FALLBACK = {
+    "onset":       "When did the symptom start?",
+    "location":    "Where exactly in your body do you feel it?",
+    "duration":    "How long has it been lasting?",
+    "character":   "How would you describe the quality — sharp, dull, or pressure?",
+    "severity":    "On a scale of 1 to 10, how severe is it?",
+    "aggravating": "What makes it worse?",
+    "relieving":   "What makes it better?",
+}
+
+
+def _fallback_reply(state: CombinedOutput) -> str:
+    if not state.chief_complaint:
+        return "What brings you in today?"
+    for f in HPI_FIELDS:
+        if not getattr(state, f):
+            return _HPI_FALLBACK.get(f, f"Can you tell me about {f}?")
+    if len(state.ros) < ROS_REQUIRED:
+        return "Are you experiencing any other symptoms in your body?"
+    return "Thank you — I have all the information I need."
 
 
 _llm_instance = None

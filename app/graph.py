@@ -1,4 +1,4 @@
-# app/graph.py — fixed version
+# app/graph.py
 
 import os
 import json
@@ -6,7 +6,7 @@ from typing import Optional, TypedDict, Annotated
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
-from app.llm import get_llm, CombinedOutput, HPI_FIELDS, ROS_REQUIRED
+from app.llm import get_llm, CombinedOutput, HPI_FIELDS, ROS_REQUIRED, _fallback_reply
 from app.schemas import ClinicalBrief, HPI, ClinicalStateExtraction
 
 _MOCK = lambda: os.environ.get("MOCK_LLM", "true").lower() == "true"
@@ -14,7 +14,8 @@ _MOCK = lambda: os.environ.get("MOCK_LLM", "true").lower() == "true"
 # Non-answers that should NOT be stored as ROS findings
 _ROS_SKIP_WORDS = frozenset({
     "next", "skip", "ok", "okay", "yes", "no", "sure", "continue",
-    "move on", "go on", "proceed", "nothing", "none", "nope", "yep"
+    "move on", "go on", "proceed", "nothing", "none", "nope", "yep",
+    "yes i am", "yes i do", "i am", "i do"
 })
 
 
@@ -35,16 +36,6 @@ EMERGENCY_PHRASES = [
     "crushing chest pain", "can't breathe", "cannot breathe",
     "heart attack", "suicide", "kill myself", "can't move", "dying"
 ]
-
-_HPI_NEXT_Q = {
-    "onset":       "When did the symptom start?",
-    "location":    "Where exactly in your body do you feel it?",
-    "duration":    "How long has it been lasting?",
-    "character":   "How would you describe the quality of the pain — sharp, dull, pressure?",
-    "severity":    "How severe is it on a scale of 1 to 10?",
-    "aggravating": "What makes it worse?",
-    "relieving":   "What makes it better?",
-}
 
 
 # ------------------------------------------------------------------ helpers --
@@ -93,16 +84,16 @@ def _detect_repeat(state) -> bool:
 
 def _is_valid_ros_finding(text: str) -> bool:
     """
-    FIX: Reject bare non-answers so we never store 'next' or 'yes' as a finding.
-    A valid finding must contain a medically descriptive word or be a negation phrase.
+    Reject bare non-answers so we never store 'next' or 'yes i am' as a finding.
+    A valid finding must be a multi-word descriptive phrase.
     """
     t = text.strip().lower()
     if t in _ROS_SKIP_WORDS:
         return False
-    # Also reject single bare words that are just affirmations
     if len(t.split()) == 1 and t in {"y", "n", "nah", "yup", "uh", "hmm"}:
         return False
-    return True
+    # Require at least 2 meaningful words
+    return len(t.split()) >= 2
 
 
 # ------------------------------------------------------------------- nodes ---
@@ -169,44 +160,30 @@ def agent_node(state: IntakeState) -> dict:
     new_hpi_extracted = curr_hpi_count > prev_hpi_count
 
     # ── Loop Guard ──────────────────────────────────────────────────────────
+    # Two-call architecture means repeat replies are much rarer, but guard is
+    # kept as a safety net for the still-possible edge cases.
     if _detect_repeat({"messages": msgs + [{"role": "assistant", "content": result.reply}]}):
 
         if new_hpi_extracted:
-            new_missing = missing_from(result)
-            if new_missing:
-                m = new_missing[0]
-                if m.startswith("HPI:"):
-                    next_field = m.replace("HPI:", "")
-                    fixed_reply = _HPI_NEXT_Q.get(next_field, f"Can you tell me about {next_field}?")
-                else:
-                    fixed_reply = "Thank you — that covers the history. Now I'd like to ask about a few related body systems."
-            else:
-                fixed_reply = "Thank you — I have everything I need."
+            # Extraction advanced — just fix the reply
+            fixed_reply = _fallback_reply(result)
             object.__setattr__(result, "reply", fixed_reply)
-            print(f"[LoopGuard] Reply-only fix. New reply: '{fixed_reply}'")
+            print(f"[LoopGuard] Reply-only fix: '{fixed_reply}'")
 
         else:
             hpi_filled = all(getattr(result, f, None) for f in HPI_FIELDS)
 
             if not hpi_filled:
+                # Force-fill the stuck HPI field so we can advance
                 for stuck_field in HPI_FIELDS:
                     if getattr(result, stuck_field, None) is None:
                         object.__setattr__(result, stuck_field, "not specified")
                         print(f"[LoopGuard] Force-filled HPI '{stuck_field}' = 'not specified'")
-                        new_missing = missing_from(result)
-                        if new_missing:
-                            m = new_missing[0]
-                            if m.startswith("HPI:"):
-                                next_field = m.replace("HPI:", "")
-                                fixed_reply = _HPI_NEXT_Q.get(next_field, f"Can you tell me about {next_field}?")
-                            else:
-                                fixed_reply = "Thank you — that covers the history. Now I'd like to ask about a few related body systems."
-                        else:
-                            fixed_reply = "Thank you — I have everything I need."
+                        fixed_reply = _fallback_reply(result)
                         object.__setattr__(result, "reply", fixed_reply)
                         break
             else:
-                # ── FIX: ROS stuck — only store answer if it's a real clinical finding ──
+                # Stuck in ROS — grab the patient's last answer
                 patient_answer = ""
                 for m in reversed(msgs):
                     if m.get("role") == "user":
@@ -220,7 +197,6 @@ def agent_node(state: IntakeState) -> dict:
                     object.__setattr__(result, "ros", ros)
                     print(f"[LoopGuard] Force-filled ROS '{ros_label}' = ['{patient_answer}']")
                 else:
-                    # Non-answer: skip filling, just ask the next ROS question
                     print(f"[LoopGuard] Non-answer '{patient_answer}' skipped — asking next ROS question")
                     object.__setattr__(result, "reply", "Are there any other symptoms you've been experiencing?")
 
@@ -235,11 +211,10 @@ def agent_node(state: IntakeState) -> dict:
         allowed_ros[new_ros_keys[0]] = result.ros[new_ros_keys[0]]
         object.__setattr__(result, "ros", allowed_ros)
 
-    # ── FIX: Filter out non-answer ROS findings added by the raw LLM ────────
+    # ── Filter out non-answer ROS findings ───────────────────────────────────
     cleaned_ros = {}
     for sys_name, findings in result.ros.items():
         valid = [f for f in findings if _is_valid_ros_finding(f)]
-        # Only keep systems that have at least one real finding, OR were in prev_ros
         if valid or sys_name in prev_ros:
             cleaned_ros[sys_name] = valid if valid else findings
     object.__setattr__(result, "ros", cleaned_ros)
@@ -248,7 +223,7 @@ def agent_node(state: IntakeState) -> dict:
 
     stage = compute_stage(result)
     missing = missing_from(result)
-    reply = result.reply or "Could you tell me more?"
+    reply = result.reply or _fallback_reply(result)
 
     if stage == "done":
         from datetime import datetime, timezone
@@ -269,7 +244,6 @@ def agent_node(state: IntakeState) -> dict:
             "ros": result.ros,
         }
 
-        # ── FIX 3: Generate a proper clinical narrative ───────────────────────
         narrative = llm.generate_brief_narrative(brief_data)
 
         brief = ClinicalBrief(
