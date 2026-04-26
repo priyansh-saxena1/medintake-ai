@@ -177,10 +177,26 @@ async def test_full_intake_multi_turn_extraction(client):
     data = r.json()
     assert data["state"] in ("hpi", "ros")
 
-    # Message 3: cover 3 ROS systems in one shot
+    # Message 3: ROS cardiac
     r = await client.post("/chat", json={
         "session_id": session_id,
-        "message": "I have palpitations, mild shortness of breath, and no nausea"
+        "message": "I have palpitations"
+    })
+    data = r.json()
+    assert data["state"] == "ros"
+
+    # Message 4: ROS respiratory
+    r = await client.post("/chat", json={
+        "session_id": session_id,
+        "message": "mild shortness of breath"
+    })
+    data = r.json()
+    assert data["state"] == "ros"
+
+    # Message 5: ROS GI
+    r = await client.post("/chat", json={
+        "session_id": session_id,
+        "message": "no nausea"
     })
     data = r.json()
     # Should be done now
@@ -191,7 +207,7 @@ async def test_full_intake_multi_turn_extraction(client):
     assert brief.chief_complaint == "chest pain"
     assert brief.hpi.onset is not None
     assert brief.hpi.severity is not None
-    assert len(brief.ros) >= 2
+    assert len(brief.ros) >= 3
 
 
 @pytest.mark.asyncio(loop_scope="function")
