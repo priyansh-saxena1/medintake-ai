@@ -1015,6 +1015,24 @@
         .replace(/"/g, '&quot;');
     }
 
+    async function fetchWithRetry(url, options, maxRetries = 3) {
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          const res = await fetch(url, options);
+          if (!res.ok) throw new Error(`Server error ${res.status}`);
+          return await res.json();
+        } catch (err) {
+          const isNetwork = err.name === 'TypeError' || err.message.includes('fetch') || err.message.includes('Failed');
+          if (isNetwork && attempt < maxRetries) {
+            console.warn(`[Retry] Attempt ${attempt}/${maxRetries} failed, retrying in ${attempt}s...`);
+            await new Promise(r => setTimeout(r, attempt * 1000));
+            continue;
+          }
+          throw err;
+        }
+      }
+    }
+
     async function sendMessage(text) {
       if (!text.trim() || isWaiting || isComplete) return;
 
@@ -1027,14 +1045,11 @@
       showTyping();
 
       try {
-        const res = await fetch('/chat', {
+        const data = await fetchWithRetry('/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ session_id: sessionId, message: text })
         });
-
-        if (!res.ok) throw new Error(`Server error ${res.status}`);
-        const data = await res.json();
 
         removeTyping();
         addMessage('agent', data.reply);
@@ -1059,7 +1074,7 @@
         removeTyping();
         const isNetwork = err.name === 'TypeError' || err.message.includes('fetch') || err.message.includes('Failed');
         const errorMsg = isNetwork
-          ? 'Network error — the tunnel may have dropped. Refresh and try again.'
+          ? 'Network error after 3 retries — the tunnel may have dropped. Refresh and try again.'
           : `Error: ${err.message}`;
         addMessage('agent', errorMsg);
         setStatus('ready');
