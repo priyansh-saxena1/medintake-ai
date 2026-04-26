@@ -6,12 +6,14 @@ from typing import Optional, TypedDict, Annotated
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
-from app.llm import get_llm, CombinedOutput, HPI_FIELDS, ROS_REQUIRED, _fallback_reply
-from app.schemas import ClinicalBrief, HPI, ClinicalStateExtraction
+from app.llm import (
+    get_llm, CombinedOutput, HPI_FIELDS, ROS_REQUIRED,
+    _fallback_reply, _next_ros_system, _ROS_QUESTIONS
+)
+from app.schemas import ClinicalBrief, HPI
 
 _MOCK = lambda: os.environ.get("MOCK_LLM", "true").lower() == "true"
 
-# Non-answers that should NOT be stored as ROS findings
 _ROS_SKIP_WORDS = frozenset({
     "next", "skip", "ok", "okay", "yes", "no", "sure", "continue",
     "move on", "go on", "proceed", "nothing", "none", "nope", "yep",
@@ -25,11 +27,11 @@ def add_messages(left: list[dict], right: list[dict]) -> list[dict]:
 
 class IntakeState(TypedDict):
     messages: Annotated[list[dict], add_messages]
-    clinical_state: str          # JSON of CombinedOutput (accumulated clinical data)
+    clinical_state: str
     missing_fields: list[str]
     current_node: str
     clinical_brief: Optional[dict]
-    frontend_stage: str          # 'intake', 'hpi', 'ros', 'done'
+    frontend_stage: str
 
 
 EMERGENCY_PHRASES = [
@@ -54,7 +56,8 @@ def compute_stage(state: CombinedOutput) -> str:
     for f in HPI_FIELDS:
         if not getattr(state, f):
             return "hpi"
-    if len(state.ros) < ROS_REQUIRED:
+    real_ros = {k: v for k, v in state.ros.items() if not k.startswith("patient_reported_")}
+    if len(real_ros) < ROS_REQUIRED:
         return "ros"
     return "done"
 
@@ -67,8 +70,9 @@ def missing_from(state: CombinedOutput) -> list[str]:
     for f in HPI_FIELDS:
         if not getattr(state, f):
             missing.append(f"HPI:{f}")
-    if len(state.ros) < ROS_REQUIRED:
-        missing.append(f"ROS ({ROS_REQUIRED - len(state.ros)} more systems needed)")
+    real_ros = {k: v for k, v in state.ros.items() if not k.startswith("patient_reported_")}
+    if len(real_ros) < ROS_REQUIRED:
+        missing.append(f"ROS ({ROS_REQUIRED - len(real_ros)} more systems needed)")
     return missing
 
 
@@ -83,17 +87,15 @@ def _detect_repeat(state) -> bool:
 
 
 def _is_valid_ros_finding(text: str) -> bool:
-    """
-    Reject bare non-answers so we never store 'next' or 'yes i am' as a finding.
-    A valid finding must be a multi-word descriptive phrase.
-    """
     t = text.strip().lower()
     if t in _ROS_SKIP_WORDS:
         return False
-    if len(t.split()) == 1 and t in {"y", "n", "nah", "yup", "uh", "hmm"}:
-        return False
-    # Require at least 2 meaningful words
     return len(t.split()) >= 2
+
+
+def _clean_ros_for_brief(ros: dict) -> dict:
+    """Remove patient_reported_N placeholder keys before writing to the clinical brief."""
+    return {k: v for k, v in ros.items() if not k.startswith("patient_reported_")}
 
 
 # ------------------------------------------------------------------- nodes ---
@@ -160,12 +162,9 @@ def agent_node(state: IntakeState) -> dict:
     new_hpi_extracted = curr_hpi_count > prev_hpi_count
 
     # ── Loop Guard ──────────────────────────────────────────────────────────
-    # Two-call architecture means repeat replies are much rarer, but guard is
-    # kept as a safety net for the still-possible edge cases.
     if _detect_repeat({"messages": msgs + [{"role": "assistant", "content": result.reply}]}):
 
         if new_hpi_extracted:
-            # Extraction advanced — just fix the reply
             fixed_reply = _fallback_reply(result)
             object.__setattr__(result, "reply", fixed_reply)
             print(f"[LoopGuard] Reply-only fix: '{fixed_reply}'")
@@ -174,7 +173,6 @@ def agent_node(state: IntakeState) -> dict:
             hpi_filled = all(getattr(result, f, None) for f in HPI_FIELDS)
 
             if not hpi_filled:
-                # Force-fill the stuck HPI field so we can advance
                 for stuck_field in HPI_FIELDS:
                     if getattr(result, stuck_field, None) is None:
                         object.__setattr__(result, stuck_field, "not specified")
@@ -183,35 +181,41 @@ def agent_node(state: IntakeState) -> dict:
                         object.__setattr__(result, "reply", fixed_reply)
                         break
             else:
-                # Stuck in ROS — grab the patient's last answer
+                # ── ROS stuck: use deterministic next system ──────────────
                 patient_answer = ""
                 for m in reversed(msgs):
                     if m.get("role") == "user":
                         patient_answer = m.get("content", "").strip()
                         break
 
-                ros = dict(prev_ros)
-                if _is_valid_ros_finding(patient_answer):
-                    ros_label = f"patient_reported_{len(ros) + 1}"
-                    ros[ros_label] = [patient_answer]
-                    object.__setattr__(result, "ros", ros)
-                    print(f"[LoopGuard] Force-filled ROS '{ros_label}' = ['{patient_answer}']")
-                else:
-                    print(f"[LoopGuard] Non-answer '{patient_answer}' skipped — asking next ROS question")
-                    object.__setattr__(result, "reply", "Are there any other symptoms you've been experiencing?")
+                real_prev_ros = {k: v for k, v in prev_ros.items() if not k.startswith("patient_reported_")}
+                next_sys = _next_ros_system(result.chief_complaint or "", set(result.ros.keys()))
 
-                if len(ros) >= ROS_REQUIRED:
+                if _is_valid_ros_finding(patient_answer) and next_sys:
+                    ros = dict(prev_ros)
+                    existing = ros.get(next_sys, [])
+                    if patient_answer not in existing:
+                        ros[next_sys] = existing + [patient_answer]
+                    object.__setattr__(result, "ros", ros)
+                    print(f"[LoopGuard] Force-filled ROS '{next_sys}' += ['{patient_answer}']")
+                else:
+                    print(f"[LoopGuard] Skipping non-answer '{patient_answer}'")
+
+                fixed_reply = _fallback_reply(result)
+                object.__setattr__(result, "reply", fixed_reply)
+
+                if len({k for k in result.ros if not k.startswith("patient_reported_")}) >= ROS_REQUIRED:
                     object.__setattr__(result, "reply", "Thank you — I have all the information I need.")
 
     # ── ROS Hallucination Guard ──────────────────────────────────────────────
     new_ros_keys = [k for k in result.ros if k not in prev_ros]
     if len(new_ros_keys) > 1:
-        print(f"[ROSGuard] LLM added {len(new_ros_keys)} ROS systems at once. Keeping first only.")
+        print(f"[ROSGuard] LLM added {len(new_ros_keys)} systems at once. Keeping first only.")
         allowed_ros = dict(prev_ros)
         allowed_ros[new_ros_keys[0]] = result.ros[new_ros_keys[0]]
         object.__setattr__(result, "ros", allowed_ros)
 
-    # ── Filter out non-answer ROS findings ───────────────────────────────────
+    # ── Filter bare-affirmative ROS findings ─────────────────────────────────
     cleaned_ros = {}
     for sys_name, findings in result.ros.items():
         valid = [f for f in findings if _is_valid_ros_finding(f)]
@@ -238,10 +242,13 @@ def agent_node(state: IntakeState) -> dict:
             relieving=result.relieving or "Not specified",
         )
 
+        # Strip placeholder keys before writing to brief
+        clean_ros = _clean_ros_for_brief(result.ros)
+
         brief_data = {
             "chief_complaint": result.chief_complaint or "Not specified",
             "hpi": hpi_obj.model_dump(),
-            "ros": result.ros,
+            "ros": clean_ros,
         }
 
         narrative = llm.generate_brief_narrative(brief_data)
@@ -249,7 +256,7 @@ def agent_node(state: IntakeState) -> dict:
         brief = ClinicalBrief(
             chief_complaint=result.chief_complaint or "Not specified",
             hpi=hpi_obj,
-            ros=result.ros,
+            ros=clean_ros,
             generated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             narrative=narrative,
         )
