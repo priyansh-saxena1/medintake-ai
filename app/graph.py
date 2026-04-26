@@ -1,3 +1,5 @@
+# app/graph.py  — complete file
+
 import os
 import json
 from typing import Optional, TypedDict, Annotated
@@ -27,6 +29,17 @@ EMERGENCY_PHRASES = [
     "crushing chest pain", "can't breathe", "cannot breathe",
     "heart attack", "suicide", "kill myself", "can't move", "dying"
 ]
+
+# ── Natural-language question for each HPI field (used by LoopGuard reply-fix) ──
+_HPI_NEXT_Q = {
+    "onset":       "when did the symptom start?",
+    "location":    "where exactly in your body do you feel it?",
+    "duration":    "how long has it been lasting?",
+    "character":   "how would you describe the quality of the pain (sharp, dull, pressure...)?",
+    "severity":    "how severe is it on a scale of 1 to 10?",
+    "aggravating": "what makes it worse?",
+    "relieving":   "what makes it better?",
+}
 
 
 # ------------------------------------------------------------------ helpers --
@@ -61,6 +74,11 @@ def missing_from(state: CombinedOutput) -> list[str]:
     if len(state.ros) < ROS_REQUIRED:
         missing.append(f"ROS ({ROS_REQUIRED - len(state.ros)} more systems needed)")
     return missing
+
+
+def _count_hpi_filled(cs: CombinedOutput) -> int:
+    """Count how many of chief_complaint + HPI_FIELDS are non-None."""
+    return sum(1 for f in ["chief_complaint"] + HPI_FIELDS if getattr(cs, f))
 
 
 def _detect_repeat(state) -> bool:
@@ -119,6 +137,7 @@ def agent_node(state: IntakeState) -> dict:
         pre_state = CombinedOutput.model_validate_json(current_json)
         current_stage = compute_stage(pre_state)
     except Exception:
+        pre_state = CombinedOutput()
         current_stage = "intake"
 
     import time
@@ -127,48 +146,86 @@ def agent_node(state: IntakeState) -> dict:
     llm = get_llm()
     result: CombinedOutput = llm.combined_call(transcript, current_json, stage=current_stage)
 
-    # ── FIX: extract prev_ros HERE — before both LoopGuard and ROSGuard need it ──
+    # ── Load previous state once — used by LoopGuard AND ROSGuard ──
     try:
-        prev_state_dict = json.loads(current_json)
-        prev_ros = prev_state_dict.get("ros") or {}
+        prev_cs = CombinedOutput.model_validate_json(current_json)
+        prev_ros = prev_cs.ros or {}
+        prev_hpi_count = _count_hpi_filled(prev_cs)
     except Exception:
+        prev_cs = CombinedOutput()
         prev_ros = {}
+        prev_hpi_count = 0
 
-    # ── Loop Guard: if LLM returned same reply as last turn, force-fill stuck field ──
+    curr_hpi_count = _count_hpi_filled(result)
+    new_hpi_extracted = curr_hpi_count > prev_hpi_count   # ← KEY: did this turn add new data?
+
+    # ── Loop Guard ──────────────────────────────────────────────────────────
     if _detect_repeat({"messages": msgs + [{"role": "assistant", "content": result.reply}]}):
-        hpi_filled = all(getattr(result, f, None) for f in HPI_FIELDS)
 
-        if not hpi_filled:
-            for stuck_field in HPI_FIELDS:
-                if getattr(result, stuck_field, None) is None:
-                    object.__setattr__(result, stuck_field, "not specified")
-                    print(f"[LoopGuard] Force-filled HPI '{stuck_field}' = 'not specified' to break repeat loop")
-                    new_missing = missing_from(result)
-                    if new_missing:
-                        object.__setattr__(result, "reply", f"Thank you. Now, could you tell me about {new_missing[0].replace('HPI:', '')}?")
-                    else:
-                        object.__setattr__(result, "reply", "Thank you — I have everything I need.")
-                    break
-        else:
-            # ROS stuck — force-fill using patient's last answer
-            patient_answer = ""
-            for m in reversed(msgs):
-                if m.get("role") == "user":
-                    patient_answer = m.get("content", "denied")
-                    break
-            patient_answer = patient_answer or "denied"
-
-            # Build on prev_ros (accumulated checkpoint state) so no systems are lost
-            ros = dict(prev_ros)
-            ros_label = f"patient_reported_{len(ros) + 1}"
-            ros[ros_label] = [patient_answer]
-            object.__setattr__(result, "ros", ros)
-            print(f"[LoopGuard] Force-filled ROS '{ros_label}' = ['{patient_answer}'] to break ROS repeat loop")
-
-            if len(ros) < ROS_REQUIRED:
-                object.__setattr__(result, "reply", "Thank you. Are there any other symptoms you've been experiencing?")
+        if new_hpi_extracted:
+            # ----------------------------------------------------------------
+            # LLM correctly extracted data BUT gave a stale/repeated reply.
+            # FIX: advance the reply to the next missing field — do NOT force-fill.
+            # ----------------------------------------------------------------
+            new_missing = missing_from(result)
+            if new_missing:
+                m = new_missing[0]
+                if m.startswith("HPI:"):
+                    next_field = m.replace("HPI:", "")
+                    next_q = _HPI_NEXT_Q.get(next_field, f"tell me about {next_field}")
+                    fixed_reply = f"Thank you. {next_q.capitalize()}"
+                else:
+                    # Transition to ROS
+                    fixed_reply = "Thank you — that covers the history. Now I'd like to ask about a few related body systems."
             else:
-                object.__setattr__(result, "reply", "Thank you — I have everything I need.")
+                fixed_reply = "Thank you — I have everything I need."
+
+            object.__setattr__(result, "reply", fixed_reply)
+            print(f"[LoopGuard] Reply-only fix applied (new data was extracted). New reply: '{fixed_reply}'")
+
+        else:
+            # ----------------------------------------------------------------
+            # LLM extracted nothing new AND repeated itself — truly stuck.
+            # Force-fill the first missing HPI field, then move on.
+            # ----------------------------------------------------------------
+            hpi_filled = all(getattr(result, f, None) for f in HPI_FIELDS)
+
+            if not hpi_filled:
+                for stuck_field in HPI_FIELDS:
+                    if getattr(result, stuck_field, None) is None:
+                        object.__setattr__(result, stuck_field, "not specified")
+                        print(f"[LoopGuard] Force-filled HPI '{stuck_field}' = 'not specified' to break repeat loop")
+                        new_missing = missing_from(result)
+                        if new_missing:
+                            m = new_missing[0]
+                            if m.startswith("HPI:"):
+                                next_field = m.replace("HPI:", "")
+                                next_q = _HPI_NEXT_Q.get(next_field, f"tell me about {next_field}")
+                                object.__setattr__(result, "reply", f"Understood. {next_q.capitalize()}")
+                            else:
+                                object.__setattr__(result, "reply", "Thank you — that covers the history. Now I'd like to ask about a few related body systems.")
+                        else:
+                            object.__setattr__(result, "reply", "Thank you — I have everything I need.")
+                        break
+            else:
+                # ROS stuck — use the patient's last answer as a finding
+                patient_answer = ""
+                for m in reversed(msgs):
+                    if m.get("role") == "user":
+                        patient_answer = m.get("content", "denied")
+                        break
+                patient_answer = patient_answer or "denied"
+
+                ros = dict(prev_ros)
+                ros_label = f"patient_reported_{len(ros) + 1}"
+                ros[ros_label] = [patient_answer]
+                object.__setattr__(result, "ros", ros)
+                print(f"[LoopGuard] Force-filled ROS '{ros_label}' = ['{patient_answer}'] to break ROS repeat loop")
+
+                if len(ros) < ROS_REQUIRED:
+                    object.__setattr__(result, "reply", "Thank you. Are there any other symptoms you've been experiencing?")
+                else:
+                    object.__setattr__(result, "reply", "Thank you — I have all the information I need.")
 
     # ── ROS Hallucination Guard: LLM can only ADD one new ROS system per turn ──
     new_ros_keys = [k for k in result.ros if k not in prev_ros]
