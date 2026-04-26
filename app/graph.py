@@ -119,12 +119,19 @@ def agent_node(state: IntakeState) -> dict:
     current_json = state.get("clinical_state") or CombinedOutput().model_dump_json()
     transcript = format_transcript(msgs)
 
+    # Compute the current stage BEFORE the LLM call so we can pick the right prompt
+    try:
+        pre_state = CombinedOutput.model_validate_json(current_json)
+        current_stage = compute_stage(pre_state)
+    except Exception:
+        current_stage = "intake"
+
     import time
     t_agent = time.time()
-    print(f"[{time.time():.3f}] [Graph Node] Requesting LLM inference...")
+    print(f"[{time.time():.3f}] [Graph Node] Requesting LLM inference (stage={current_stage})...")
 
     llm = get_llm()
-    result: CombinedOutput = llm.combined_call(transcript, current_json)
+    result: CombinedOutput = llm.combined_call(transcript, current_json, stage=current_stage)
 
     # ── Loop Guard: if LLM returned same reply as last turn, force-fill stuck field ──
     if _detect_repeat({"messages": msgs + [{"role": "assistant", "content": result.reply}]}):
@@ -141,11 +148,6 @@ def agent_node(state: IntakeState) -> dict:
                 break
 
     # ── ROS Hallucination Guard: LLM can only ADD one new ROS system per turn ──
-    ROS_QUESTIONS = {
-        "cardiac": "Have you experienced any palpitations, leg swelling, or dizziness?",
-        "respiratory": "Have you had any shortness of breath, coughing, or wheezing?",
-        "gi": "Have you had any nausea, vomiting, or heartburn?",
-    }
     try:
         prev_state = json.loads(current_json)
         prev_ros = prev_state.get("ros") or {}
@@ -153,7 +155,7 @@ def agent_node(state: IntakeState) -> dict:
         prev_ros = {}
     new_ros_keys = [k for k in result.ros if k not in prev_ros]
     if len(new_ros_keys) > 1:
-        print(f"[ROSGuard] LLM hallucinated {len(new_ros_keys)} new ROS systems in one turn: {new_ros_keys}. Keeping only first.")
+        print(f"[ROSGuard] LLM added {len(new_ros_keys)} new ROS systems in one turn: {new_ros_keys}. Keeping only first.")
         allowed_ros = dict(prev_ros)
         allowed_ros[new_ros_keys[0]] = result.ros[new_ros_keys[0]]
         object.__setattr__(result, "ros", allowed_ros)
@@ -162,19 +164,7 @@ def agent_node(state: IntakeState) -> dict:
 
     stage = compute_stage(result)
     missing = missing_from(result)
-
-    # ── ROS Question Forcing: if all HPI done but ROS incomplete, force a specific ROS question ──
-    if stage == "ros":
-        current_ros = result.ros or {}
-        for sys_name, question in ROS_QUESTIONS.items():
-            if sys_name not in current_ros:
-                print(f"[ROSForce] Forcing question for missing ROS system: {sys_name}")
-                reply = question
-                break
-        else:
-            reply = result.reply or "Could you tell me more?"
-    else:
-        reply = result.reply or "Could you tell me more?"
+    reply = result.reply or "Could you tell me more?"
 
     # All fields complete — build the brief inline so it's available this turn
     if stage == "done":
