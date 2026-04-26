@@ -23,8 +23,6 @@ class IntakeState(TypedDict):
     frontend_stage: str          # 'intake', 'hpi', 'ros', 'done'
 
 
-# HPI_FIELDS and ROS_REQUIRED imported from app.llm
-
 EMERGENCY_PHRASES = [
     "crushing chest pain", "can't breathe", "cannot breathe",
     "heart attack", "suicide", "kill myself", "can't move", "dying"
@@ -99,11 +97,10 @@ def agent_node(state: IntakeState) -> dict:
     Core agent node — ONE combined LLM call per turn:
     1. Extracts any new clinical data from the transcript.
     2. Generates the next conversational question.
-    3. If all data is collected, builds the ClinicalBrief inline (no separate scribe node).
+    3. If all data is collected, builds the ClinicalBrief inline.
     """
     msgs = state.get("messages", [])
 
-    # On first call with no messages, return opening greeting
     if not msgs or (len(msgs) == 1 and msgs[0]["role"] == "assistant"):
         return {
             "messages": [{"role": "assistant", "content": "Hello, I'm conducting your pre-visit clinical intake. What brings you in today?"}],
@@ -118,7 +115,6 @@ def agent_node(state: IntakeState) -> dict:
     current_json = state.get("clinical_state") or CombinedOutput().model_dump_json()
     transcript = format_transcript(msgs)
 
-    # Compute the current stage BEFORE the LLM call so we can pick the right prompt
     try:
         pre_state = CombinedOutput.model_validate_json(current_json)
         current_stage = compute_stage(pre_state)
@@ -126,18 +122,23 @@ def agent_node(state: IntakeState) -> dict:
         current_stage = "intake"
 
     import time
-    t_agent = time.time()
     print(f"[{time.time():.3f}] [Graph Node] Requesting LLM inference (stage={current_stage})...")
 
     llm = get_llm()
     result: CombinedOutput = llm.combined_call(transcript, current_json, stage=current_stage)
+
+    # ── FIX: extract prev_ros HERE — before both LoopGuard and ROSGuard need it ──
+    try:
+        prev_state_dict = json.loads(current_json)
+        prev_ros = prev_state_dict.get("ros") or {}
+    except Exception:
+        prev_ros = {}
 
     # ── Loop Guard: if LLM returned same reply as last turn, force-fill stuck field ──
     if _detect_repeat({"messages": msgs + [{"role": "assistant", "content": result.reply}]}):
         hpi_filled = all(getattr(result, f, None) for f in HPI_FIELDS)
 
         if not hpi_filled:
-            # Still in HPI — force-fill the first empty HPI field
             for stuck_field in HPI_FIELDS:
                 if getattr(result, stuck_field, None) is None:
                     object.__setattr__(result, stuck_field, "not specified")
@@ -149,7 +150,7 @@ def agent_node(state: IntakeState) -> dict:
                         object.__setattr__(result, "reply", "Thank you — I have everything I need.")
                     break
         else:
-            # In ROS stage — force-fill the current ROS system with patient's last answer
+            # ROS stuck — force-fill using patient's last answer
             patient_answer = ""
             for m in reversed(msgs):
                 if m.get("role") == "user":
@@ -157,7 +158,7 @@ def agent_node(state: IntakeState) -> dict:
                     break
             patient_answer = patient_answer or "denied"
 
-            # Find which ROS system the LLM was asking about (from its repeated reply)
+            # Build on prev_ros (accumulated checkpoint state) so no systems are lost
             ros = dict(prev_ros)
             ros_label = f"patient_reported_{len(ros) + 1}"
             ros[ros_label] = [patient_answer]
@@ -165,16 +166,11 @@ def agent_node(state: IntakeState) -> dict:
             print(f"[LoopGuard] Force-filled ROS '{ros_label}' = ['{patient_answer}'] to break ROS repeat loop")
 
             if len(ros) < ROS_REQUIRED:
-                object.__setattr__(result, "reply", f"Thank you. Are there any other symptoms you've been experiencing?")
+                object.__setattr__(result, "reply", "Thank you. Are there any other symptoms you've been experiencing?")
             else:
                 object.__setattr__(result, "reply", "Thank you — I have everything I need.")
 
     # ── ROS Hallucination Guard: LLM can only ADD one new ROS system per turn ──
-    try:
-        prev_state = json.loads(current_json)
-        prev_ros = prev_state.get("ros") or {}
-    except Exception:
-        prev_ros = {}
     new_ros_keys = [k for k in result.ros if k not in prev_ros]
     if len(new_ros_keys) > 1:
         print(f"[ROSGuard] LLM added {len(new_ros_keys)} new ROS systems in one turn: {new_ros_keys}. Keeping only first.")
@@ -188,7 +184,6 @@ def agent_node(state: IntakeState) -> dict:
     missing = missing_from(result)
     reply = result.reply or "Could you tell me more?"
 
-    # All fields complete — build the brief inline so it's available this turn
     if stage == "done":
         from datetime import datetime, timezone
         brief = ClinicalBrief(
@@ -239,7 +234,6 @@ def build_graph():
     workflow.add_edge("agent", END)
 
     checkpointer = MemorySaver()
-    # Interrupt after agent so it pauses for user input each turn
     graph = workflow.compile(
         checkpointer=checkpointer,
         interrupt_after=["agent"]
