@@ -140,6 +140,30 @@ def agent_node(state: IntakeState) -> dict:
                     object.__setattr__(result, "reply", "Thank you — I have everything I need.")
                 break
 
+    # ── ROS Hallucination Guard: LLM can only ADD one new ROS system per turn ──
+    try:
+        prev_state = json.loads(current_json)
+        prev_ros = prev_state.get("ros", {})
+    except Exception:
+        prev_ros = {}
+    new_ros_keys = [k for k in result.ros if k not in prev_ros]
+    if len(new_ros_keys) > 1:
+        print(f"[ROSGuard] LLM hallucinated {len(new_ros_keys)} new ROS systems in one turn: {new_ros_keys}. Keeping only first.")
+        # Keep only the first new system, strip the rest
+        allowed_ros = dict(prev_ros)  # keep old
+        allowed_ros[new_ros_keys[0]] = result.ros[new_ros_keys[0]]
+        object.__setattr__(result, "ros", allowed_ros)
+        # Generate a reply asking about the next missing system
+        ROS_QUESTIONS = {
+            "cardiac": "Have you experienced any palpitations, leg swelling, or dizziness?",
+            "respiratory": "Have you had any shortness of breath, coughing, or wheezing?",
+            "gi": "Have you had any nausea, vomiting, or heartburn?",
+        }
+        for sys_name, question in ROS_QUESTIONS.items():
+            if sys_name not in allowed_ros:
+                object.__setattr__(result, "reply", question)
+                break
+
     print(f"[{time.time():.3f}] [Graph Node] LLM returned. Preparing node dictionaries...")
 
     stage = compute_stage(result)
