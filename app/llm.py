@@ -1,6 +1,5 @@
 import os
 import json
-import re
 from pydantic import BaseModel
 
 INTAKE_PROMPT = """You are a clinical intake assistant. The patient just arrived.
@@ -111,98 +110,62 @@ class CombinedOutput(BaseModel):
 
 
 class MockLLM:
+    """Minimal mock for testing — no regex, no extraction logic. Just walks through fields."""
     def combined_call(self, transcript: str, current_json: str, stage: str = "intake") -> CombinedOutput:
-        """Single call: extract + generate reply. No real inference in mock mode."""
-        t = transcript.lower()
         try:
             state = json.loads(current_json)
         except Exception:
             state = {}
 
-        # --- Extraction ---
-        if "chest pain" in t and not state.get("chief_complaint"):
-            state["chief_complaint"] = "chest pain"
-        if any(w in t for w in ["yesterday", "this morning", "last night", "hours ago", "days ago", "since"]):
-            if not state.get("onset"):
-                if "yesterday" in t:
-                    state["onset"] = "yesterday"
-                elif "this morning" in t or "morning" in t:
-                    state["onset"] = "this morning"
-                else:
-                    state["onset"] = "recently"
-        if any(w in t for w in ["center", "left", "right", "chest", "stomach", "head", "arm"]):
-            if not state.get("location"):
-                if "center" in t:
-                    state["location"] = "center of chest"
-                elif "left" in t:
-                    state["location"] = "left side of chest"
-        if any(w in t for w in ["constant", "intermittent", "comes and goes", "all day", "hours"]):
-            if not state.get("duration"):
-                state["duration"] = "constant" if "constant" in t else "intermittent"
-        if any(w in t for w in ["pressure", "tight", "squeezing", "sharp", "dull", "burning", "stabbing"]):
-            if not state.get("character"):
-                if "tight" in t or "squeezing" in t:
-                    state["character"] = "tight, squeezing pressure"
-                elif "sharp" in t:
-                    state["character"] = "sharp"
-        # Severity — match "N out of 10", "N/10", or isolated score digit
-        sev_match = re.search(r'\b([1-9]|10)\s*(?:out of|/|over)\s*10\b', t, re.IGNORECASE)
-        if not sev_match:
-            sev_match = re.search(r'\bseverity\s+(?:is\s+)?([1-9]|10)\b', t, re.IGNORECASE)
-        if sev_match and not state.get("severity"):
-            state["severity"] = f"{sev_match.group(1)}/10"
-        if any(w in t for w in ["walk", "run", "climb", "exert", "stress", "eating", "lying"]):
-            if not state.get("aggravating"):
-                if "walk" in t: state["aggravating"] = "walking"
-                elif "run" in t: state["aggravating"] = "running"
-                elif "climb" in t: state["aggravating"] = "climbing stairs"
-        if any(w in t for w in ["rest", "sit", "antacid", "medication", "nitroglycerin"]):
-            if not state.get("relieving"):
-                state["relieving"] = "resting"
-        if "palpitation" in t:
-            ros = state.get("ros", {})
-            ros["cardiac"] = ["palpitations present"] + (["no leg swelling"] if "no" in t and "swell" in t else [])
-            state["ros"] = ros
-        if "breath" in t or "wheez" in t or "cough" in t:
-            ros = state.get("ros", {})
-            ros["respiratory"] = ["shortness of breath" if "breath" in t else "no shortness of breath",
-                                    "no cough" if ("no" in t and "cough" in t) else ("cough" if "cough" in t else "no cough")]
-            state["ros"] = ros
-        if "nausea" in t or "vomit" in t or "heartburn" in t:
-            ros = state.get("ros", {})
-            ros["gi"] = ["no nausea" if ("no" in t and "nausea" in t) else "nausea",
-                         "no vomiting" if ("no" in t and "vomit" in t) else "vomiting present"]
-            state["ros"] = ros
-        
-        state["emergency"] = any(e in t for e in ["crushing chest pain", "heart attack", "can't breathe", "suicide", "kill myself"])
+        # Mock just steps through HPI fields in order, using the patient's last message as the value
+        lines = transcript.strip().split("\n")
+        last_patient_msg = ""
+        for line in reversed(lines):
+            if line.startswith("Patient:"):
+                last_patient_msg = line.replace("Patient:", "").strip()
+                break
 
-        # --- Determine next question ---
-        if not state.get("chief_complaint"):
-            state["reply"] = "What brings you in today?"
-        elif not state.get("onset"):
-            cc = state.get("chief_complaint", "this")
-            state["reply"] = f"When did the {cc} start?"
-        elif not state.get("location"):
-            state["reply"] = "Where exactly do you feel it?"
-        elif not state.get("duration"):
-            state["reply"] = "Is it constant or does it come and go?"
-        elif not state.get("character"):
-            state["reply"] = "How would you describe it — sharp, dull, pressure, or tightness?"
-        elif not state.get("severity"):
-            state["reply"] = "On a scale of 1 to 10, how severe is it right now?"
-        elif not state.get("aggravating"):
-            state["reply"] = "Does anything make it worse, like physical activity?"
-        elif not state.get("relieving"):
-            state["reply"] = "What helps relieve it?"
-        else:
+        hpi_fields = ["chief_complaint", "onset", "location", "duration", "character", "severity", "aggravating", "relieving"]
+        ros_systems = ["cardiac", "respiratory", "gi"]
+
+        if stage == "intake":
+            if last_patient_msg and not state.get("chief_complaint"):
+                state["chief_complaint"] = last_patient_msg
+            state["reply"] = "What brings you in today?" if not state.get("chief_complaint") else f"When did the {state['chief_complaint']} start?"
+
+        elif stage == "hpi":
+            # Fill the first empty HPI field with the patient's answer
+            for field in hpi_fields[1:]:  # skip chief_complaint, already filled
+                if not state.get(field):
+                    if last_patient_msg:
+                        state[field] = last_patient_msg
+                    break
+            # Ask about the next missing field
+            for field in hpi_fields[1:]:
+                if not state.get(field):
+                    labels = {"onset": "when it started", "location": "where you feel it",
+                              "duration": "how long it's lasted", "character": "what it feels like",
+                              "severity": "how severe it is (1-10)", "aggravating": "what makes it worse",
+                              "relieving": "what makes it better"}
+                    state["reply"] = f"Can you tell me {labels.get(field, field)}?"
+                    break
+            else:
+                state["reply"] = "Thank you, moving on to review of systems."
+
+        elif stage == "ros":
             ros = state.get("ros", {})
-            cc = state.get("chief_complaint", "chest pain")
-            if "cardiac" not in ros:
-                state["reply"] = "Any heart-related symptoms — palpitations or leg swelling?"
-            elif "respiratory" not in ros:
-                state["reply"] = "Any shortness of breath, wheezing, or coughing?"
-            elif "gi" not in ros:
-                state["reply"] = "Any nausea, vomiting, or heartburn?"
+            # Fill the first empty ROS system
+            for sys_name in ros_systems:
+                if sys_name not in ros:
+                    if last_patient_msg:
+                        ros[sys_name] = [last_patient_msg]
+                        state["ros"] = ros
+                    break
+            # Ask about next missing system
+            for sys_name in ros_systems:
+                if sys_name not in ros:
+                    state["reply"] = f"Any {sys_name} symptoms?"
+                    break
             else:
                 state["reply"] = "Thank you — I have everything I need."
 
